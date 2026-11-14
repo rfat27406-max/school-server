@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "school-server",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-14",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "school-db",
+      "database_id": "PUT_YOUR_D1_DATABASE_ID_HERE"
+    }
+  ],
+  "vars": {
+    "ALLOWED_ORIGINS": "https://YOUR-STUDENT-SITE.pages.dev,https://YOUR-ADMIN-SITE.pages.dev"
+  }
+}
