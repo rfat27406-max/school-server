@@ -1,3 +1,4 @@
+
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "school-server",
@@ -11,5 +12,6 @@
     }
   ],
   "vars": {
-"ALLOWED_ORIGINS": "https://student-platform-ekt.pages.dev,https://admin-platform-dpb.pages.dev"
+    "ALLOWED_ORIGINS": "https://student-platform-ekt.pages.dev,https://admin-platform-dpb.pages.dev"
+  }
 }
