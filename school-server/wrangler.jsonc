@@ -11,6 +11,5 @@
     }
   ],
   "vars": {
-    "ALLOWED_ORIGINS": "https://YOUR-STUDENT-SITE.pages.dev,https://YOUR-ADMIN-SITE.pages.dev"
-  }
+"ALLOWED_ORIGINS": "https://student-platform-ekt.pages.dev"  }
 }
