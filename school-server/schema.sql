@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS teachers (
   name TEXT NOT NULL,
   subject TEXT NOT NULL,
   education_level TEXT NOT NULL,
+  password_hash TEXT,
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS bookings (
   student_id TEXT NOT NULL REFERENCES students(id),
   group_id INTEGER NOT NULL REFERENCES groups(id),
   session_date TEXT NOT NULL,
+  registered_on TEXT,
   status TEXT NOT NULL DEFAULT 'registered' CHECK (status IN ('registered','cancelled','attended','absent')),
   payment_status TEXT NOT NULL DEFAULT 'unpaid' CHECK (payment_status IN ('unpaid','paid')),
   paid_at TEXT,
@@ -53,6 +55,7 @@ CREATE TABLE IF NOT EXISTS bookings (
 
 CREATE INDEX IF NOT EXISTS idx_bookings_student ON bookings(student_id, session_date);
 CREATE INDEX IF NOT EXISTS idx_bookings_group_date ON bookings(group_id, session_date);
+CREATE INDEX IF NOT EXISTS idx_bookings_student_registered_on ON bookings(student_id, registered_on);
 CREATE INDEX IF NOT EXISTS idx_sessions_token ON student_sessions(token_hash);
 
 INSERT OR IGNORE INTO teachers (id, name, subject, education_level)
@@ -64,3 +67,46 @@ INSERT OR IGNORE INTO groups (id, teacher_id, name, weekday, start_time, end_tim
 (3, 'teacher-boumediene', 'الفوج الثالث', 'friday', '14:00', '16:00', 300),
 (4, 'teacher-boumediene', 'الفوج الرابع', 'saturday', '08:00', '10:00', 300),
 (5, 'teacher-boumediene', 'الفوج الخامس', 'saturday', '10:00', '12:00', 300);
+
+-- Sessions منفصلة للإدارة والأساتذة.
+CREATE TABLE IF NOT EXISTS admin_sessions (
+  id TEXT PRIMARY KEY,
+  admin_id TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT,
+  revoked_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS teacher_sessions (
+  id TEXT PRIMARY KEY,
+  teacher_id TEXT NOT NULL REFERENCES teachers(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT,
+  revoked_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_token ON admin_sessions(token_hash);
+CREATE INDEX IF NOT EXISTS idx_teacher_sessions_token ON teacher_sessions(token_hash);
+
+-- إشعارات داخل المنصة. Web Push يتطلب إعداد VAPID وService Worker منفصلين.
+CREATE TABLE IF NOT EXISTS notifications (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  message TEXT NOT NULL,
+  audience TEXT NOT NULL CHECK (audience IN ('all','student')),
+  student_id TEXT REFERENCES students(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_student ON notifications(student_id, created_at);
+
+CREATE TABLE IF NOT EXISTS auth_login_limits (
+  ip_hash TEXT NOT NULL,
+  purpose TEXT NOT NULL,
+  window_key TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (ip_hash, purpose, window_key)
+);
+
