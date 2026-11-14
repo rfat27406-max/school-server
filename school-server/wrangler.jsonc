@@ -7,7 +7,7 @@
     {
       "binding": "DB",
       "database_name": "school-db",
-      "database_id": "PUT_YOUR_D1_DATABASE_ID_HERE"
+      "database_id": "cf7d2a59-db76-418d-9267-6a5864dc4234"
     }
   ],
   "vars": {
