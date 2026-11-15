@@ -273,16 +273,27 @@ async function handle(request, env) {
   }
   if (path.startsWith("/api/teacher/") && path !== "/api/teacher/login") {
     teacherAuth = await authenticatedTeacher(request, env);
-    // لوحة الإدارة تستطيع عرض صفحة الأستاذ الافتراضية؛ أما دخول الأستاذ نفسه فيبقى بجلسة مستقلة.
+
+    // الإدارة تستطيع اختيار أي أستاذ لعرض فضائه، بينما الأستاذ العادي
+    // يبقى محصوراً في هويته المستخرجة من جلسة الدخول.
     if (!teacherAuth) {
       adminAuth = adminAuth || await authenticatedAdmin(request, env);
       if (adminAuth) {
+        const requestedTeacherId = String(
+          url.searchParams.get("teacher_id") || "teacher-boumediene"
+        );
         teacherAuth = await env.DB.prepare(`
           SELECT id, name, subject, education_level
-          FROM teachers WHERE id = 'teacher-boumediene' LIMIT 1
-        `).first();
+          FROM teachers
+          WHERE id = ? AND active = 1
+          LIMIT 1
+        `).bind(requestedTeacherId).first();
+        if (!teacherAuth) {
+          return json({ error: "الأستاذ المحدد غير موجود أو غير نشط." }, 404);
+        }
       }
     }
+
     if (!teacherAuth) return json({ error: "يلزم تسجيل دخول الأستاذ." }, 401);
   }
 
@@ -368,7 +379,23 @@ async function handle(request, env) {
     return json({ group_id: result.meta.last_row_id, message: "تم إنشاء الفوج." }, 201);
   }
 
-  // إشعار إداري يظهر داخل فضاء التلميذ.
+  // سجل الإشعارات للإدارة.
+  if (path === "/api/admin/notifications" && request.method === "GET") {
+    const { results } = await env.DB.prepare(`
+      SELECT n.id, n.title, n.message, n.audience, n.student_id, n.created_at,
+        CASE
+          WHEN n.audience = 'all' THEN 'جميع التلاميذ'
+          ELSE COALESCE(s.first_name || ' ' || s.last_name, 'تلميذ محدد')
+        END AS recipient_name
+      FROM notifications n
+      LEFT JOIN students s ON s.id = n.student_id
+      ORDER BY n.created_at DESC
+      LIMIT 100
+    `).all();
+    return json({ notifications: results });
+  }
+
+  // نشر إشعار داخل المنصة، للجميع أو لتلميذ محدد.
   if (path === "/api/admin/notifications" && request.method === "POST") {
     let body = {};
     try { body = await request.json(); } catch {}
@@ -376,16 +403,30 @@ async function handle(request, env) {
     const message = String(body.message || "").trim();
     const audience = String(body.audience || "all");
     const studentId = String(body.student_id || "");
+
     if (!title || !message || !["all", "student"].includes(audience) ||
         (audience === "student" && !studentId)) {
-      return json({ error: "بيانات الإشعار غير مكتملة." }, 400);
+      return json({ error: "أدخل عنوان الإشعار ونصه وحدد المستلم." }, 400);
     }
+
+    if (audience === "student") {
+      const student = await env.DB.prepare(
+        "SELECT id FROM students WHERE id = ? LIMIT 1"
+      ).bind(studentId).first();
+      if (!student) return json({ error: "التلميذ المحدد غير موجود." }, 404);
+    }
+
     const id = crypto.randomUUID();
     await env.DB.prepare(`
       INSERT INTO notifications (id, title, message, audience, student_id)
       VALUES (?, ?, ?, ?, ?)
     `).bind(id, title, message, audience, audience === "student" ? studentId : null).run();
-    return json({ id, message: "تم نشر الإشعار." }, 201);
+
+    return json({
+      id,
+      message: "تم حفظ الإشعار ونشره داخل فضاء التلاميذ.",
+      delivery: "in_app"
+    }, 201);
   }
 
   // ==========================================
@@ -434,7 +475,8 @@ async function handle(request, env) {
     request.method === "GET"
   ) {
     const { results } = await env.DB.prepare(`
-      SELECT id, name, subject, education_level
+      SELECT id, name, subject, education_level,
+        (SELECT COUNT(*) FROM groups g WHERE g.teacher_id = teachers.id AND g.active = 1) AS groups_count
       FROM teachers
       WHERE active = 1
       ORDER BY name
