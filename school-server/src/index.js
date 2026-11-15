@@ -194,12 +194,146 @@ function registrationWindowIsOpen(now) {
   return allowedDay && minutes >= 450 && minutes < 960;
 }
 
+
+// ---------------- Web Push (RFC 8291 + VAPID) ----------------
+const textEncoder = new TextEncoder();
+function b64urlEncode(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+function b64urlDecode(value) {
+  const normalized = String(value).replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(normalized + "=".repeat((4 - normalized.length % 4) % 4));
+  return Uint8Array.from(binary, ch => ch.charCodeAt(0));
+}
+function concatBytes(...arrays) {
+  const length = arrays.reduce((sum, item) => sum + item.length, 0);
+  const out = new Uint8Array(length);
+  let offset = 0;
+  for (const item of arrays) { out.set(item, offset); offset += item.length; }
+  return out;
+}
+async function hkdf(secret, salt, info, length) {
+  const key = await crypto.subtle.importKey("raw", secret, "HKDF", false, ["deriveBits"]);
+  return new Uint8Array(await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt, info }, key, length * 8));
+}
+async function vapidAuthorization(endpoint, env) {
+  if (!env.VAPID_PRIVATE_JWK || !env.VAPID_PUBLIC_KEY) throw new Error("VAPID is not configured");
+  const origin = new URL(endpoint).origin;
+  const now = Math.floor(Date.now() / 1000);
+  const header = b64urlEncode(textEncoder.encode(JSON.stringify({ typ: "JWT", alg: "ES256" })));
+  const payload = b64urlEncode(textEncoder.encode(JSON.stringify({ aud: origin, exp: now + 12 * 60 * 60, sub: env.VAPID_SUBJECT || "mailto:admin@example.com" })));
+  const unsigned = `${header}.${payload}`;
+  const jwk = JSON.parse(env.VAPID_PRIVATE_JWK);
+  const key = await crypto.subtle.importKey("jwk", jwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+  const signature = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, textEncoder.encode(unsigned)));
+  return `vapid t=${unsigned}.${b64urlEncode(signature)}, k=${env.VAPID_PUBLIC_KEY}`;
+}
+async function encryptPushPayload(subscription, payload) {
+  const userPublic = b64urlDecode(subscription.p256dh);
+  const authSecret = b64urlDecode(subscription.auth);
+  if (userPublic.length !== 65 || authSecret.length < 16) throw new Error("Invalid subscription keys");
+  const userKey = await crypto.subtle.importKey("raw", userPublic, { name: "ECDH", namedCurve: "P-256" }, false, []);
+  const serverKeys = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const sharedSecret = new Uint8Array(await crypto.subtle.deriveBits({ name: "ECDH", public: userKey }, serverKeys.privateKey, 256));
+  const serverPublic = new Uint8Array(await crypto.subtle.exportKey("raw", serverKeys.publicKey));
+  const authInfo = concatBytes(textEncoder.encode("WebPush: info\0"), userPublic, serverPublic);
+  const ikm = await hkdf(sharedSecret, authSecret, authInfo, 32);
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const cek = await hkdf(ikm, salt, textEncoder.encode("Content-Encoding: aes128gcm\0"), 16);
+  const nonce = await hkdf(ikm, salt, textEncoder.encode("Content-Encoding: nonce\0"), 12);
+  const aesKey = await crypto.subtle.importKey("raw", cek, { name: "AES-GCM" }, false, ["encrypt"]);
+  const plaintext = concatBytes(textEncoder.encode(JSON.stringify(payload)), new Uint8Array([2]));
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce, tagLength: 128 }, aesKey, plaintext));
+  const header = new Uint8Array(21 + serverPublic.length);
+  header.set(salt, 0);
+  new DataView(header.buffer).setUint32(16, 4096, false);
+  header[20] = serverPublic.length;
+  header.set(serverPublic, 21);
+  return concatBytes(header, ciphertext);
+}
+async function sendWebPush(subscription, payload, env) {
+  const body = await encryptPushPayload(subscription, payload);
+  const authorization = await vapidAuthorization(subscription.endpoint, env);
+  return fetch(subscription.endpoint, {
+    method: "POST",
+    headers: {
+      "Authorization": authorization,
+      "Content-Encoding": "aes128gcm",
+      "Content-Type": "application/octet-stream",
+      "TTL": "86400",
+      "Urgency": "high"
+    },
+    body
+  });
+}
+async function pushToStudents(env, studentId, payload) {
+  const query = studentId
+    ? env.DB.prepare("SELECT id, student_id, endpoint, p256dh, auth FROM push_subscriptions WHERE student_id = ?").bind(studentId)
+    : env.DB.prepare("SELECT id, student_id, endpoint, p256dh, auth FROM push_subscriptions");
+  const { results = [] } = await query.all();
+  let sent = 0, failed = 0;
+  for (const subscription of results) {
+    try {
+      const response = await sendWebPush(subscription, payload, env);
+      if (response.ok) sent++;
+      else {
+        failed++;
+        if (response.status === 404 || response.status === 410) {
+          await env.DB.prepare("DELETE FROM push_subscriptions WHERE id = ?").bind(subscription.id).run();
+        }
+      }
+    } catch (error) {
+      failed++;
+      console.error("Web Push delivery failed", error);
+    }
+  }
+  return { attempted: results.length, sent, failed };
+}
+async function deliverUpcomingLessonReminders(env) {
+  const now = localNow();
+  const today = `${now.year}-${now.month}-${now.day}`;
+  const currentMinutes = Number(now.hour) * 60 + Number(now.minute);
+  const { results = [] } = await env.DB.prepare(`
+    SELECT b.id AS booking_id, b.student_id, b.session_date, g.name AS group_name,
+      g.start_time, g.end_time, t.name AS teacher_name
+    FROM bookings b
+    JOIN groups g ON g.id = b.group_id
+    JOIN teachers t ON t.id = g.teacher_id
+    WHERE b.session_date = ? AND b.status = 'registered'
+      AND b.reminder_sent_at IS NULL
+  `).bind(today).all();
+  for (const booking of results) {
+    const [hour, minute] = String(booking.start_time).split(":").map(Number);
+    const minutesUntil = hour * 60 + minute - currentMinutes;
+    if (minutesUntil < 25 || minutesUntil > 35) continue;
+    const delivery = await pushToStudents(env, booking.student_id, {
+      title: "تذكير بموعد حصتك",
+      body: `تبقّى حوالي 30 دقيقة على حصة ${booking.group_name} مع الأستاذ ${booking.teacher_name} (${booking.start_time}).`,
+      url: "/",
+      tag: `lesson-reminder-${booking.booking_id}`,
+      kind: "lesson-reminder"
+    });
+    if (delivery.failed === 0) {
+      await env.DB.prepare("UPDATE bookings SET reminder_sent_at = datetime('now') WHERE id = ? AND reminder_sent_at IS NULL")
+        .bind(booking.booking_id).run();
+    }
+  }
+}
+
 async function handle(request, env) {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204 });
+  }
+
+  // Public VAPID key used by the student browser to subscribe.
+  if (path === "/api/push/public-key" && request.method === "GET") {
+    if (!env.VAPID_PUBLIC_KEY) return json({ error: "خدمة الإشعارات الفورية غير مهيأة بعد." }, 503);
+    return json({ publicKey: env.VAPID_PUBLIC_KEY });
   }
 
   // ==========================================
@@ -295,6 +429,35 @@ async function handle(request, env) {
     }
 
     if (!teacherAuth) return json({ error: "يلزم تسجيل دخول الأستاذ." }, 401);
+  }
+
+  // Save or refresh this student's Web Push subscription.
+  if (path === "/api/push/subscribe" && request.method === "POST") {
+    const student = await authenticatedStudent(request, env);
+    if (!student) return json({ error: "يلزم تسجيل الدخول." }, 401);
+    let body = {};
+    try { body = await request.json(); } catch {}
+    const endpoint = String(body.endpoint || "");
+    const p256dh = String(body.keys?.p256dh || "");
+    const auth = String(body.keys?.auth || "");
+    if (!endpoint.startsWith("https://") || !p256dh || !auth) return json({ error: "بيانات الاشتراك غير صالحة." }, 400);
+    await env.DB.prepare(`
+      INSERT INTO push_subscriptions (id, student_id, endpoint, p256dh, auth, last_seen_at)
+      VALUES (?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(endpoint) DO UPDATE SET student_id = excluded.student_id,
+        p256dh = excluded.p256dh, auth = excluded.auth, last_seen_at = datetime('now')
+    `).bind(crypto.randomUUID(), student.id, endpoint, p256dh, auth).run();
+    return json({ subscribed: true });
+  }
+
+  if (path === "/api/push/unsubscribe" && request.method === "POST") {
+    const student = await authenticatedStudent(request, env);
+    if (!student) return json({ error: "يلزم تسجيل الدخول." }, 401);
+    let body = {};
+    try { body = await request.json(); } catch {}
+    if (body.endpoint) await env.DB.prepare("DELETE FROM push_subscriptions WHERE student_id = ? AND endpoint = ?")
+      .bind(student.id, String(body.endpoint)).run();
+    return json({ unsubscribed: true });
   }
 
   // ملخص مالي شامل للإدارة.
@@ -422,10 +585,20 @@ async function handle(request, env) {
       VALUES (?, ?, ?, ?, ?)
     `).bind(id, title, message, audience, audience === "student" ? studentId : null).run();
 
+    let pushDelivery = { attempted: 0, sent: 0, failed: 0 };
+    let pushConfigured = Boolean(env.VAPID_PRIVATE_JWK && env.VAPID_PUBLIC_KEY);
+    if (pushConfigured) {
+      pushDelivery = await pushToStudents(env, audience === "student" ? studentId : null, {
+        title, body: message, url: "/", tag: `admin-notification-${id}`, kind: "announcement"
+      });
+    }
     return json({
       id,
-      message: "تم حفظ الإشعار ونشره داخل فضاء التلاميذ.",
-      delivery: "in_app"
+      message: pushConfigured
+        ? `تم نشر الإشعار. وصل إلى ${pushDelivery.sent} جهازاً من أصل ${pushDelivery.attempted} اشتراك.`
+        : "تم حفظ الإشعار داخل المنصة، لكن الإشعارات الفورية لم تُهيأ بعد.",
+      delivery: pushConfigured ? "web_push" : "in_app",
+      push: pushDelivery
     }, 201);
   }
 
@@ -1207,21 +1380,13 @@ async function handle(request, env) {
 export default {
   async fetch(request, env) {
     try {
-      return withCors(
-        await handle(request, env),
-        request,
-        env
-      );
+      return withCors(await handle(request, env), request, env);
     } catch (error) {
       console.error("API error", error);
-
-      return withCors(
-        json({
-          error: "حدث خطأ داخلي. حاول لاحقاً."
-        }, 500),
-        request,
-        env
-      );
+      return withCors(json({ error: "حدث خطأ داخلي. حاول لاحقاً." }, 500), request, env);
     }
+  },
+  async scheduled(controller, env, ctx) {
+    await deliverUpcomingLessonReminders(env);
   }
 };

@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS bookings (
   group_id INTEGER NOT NULL REFERENCES groups(id),
   session_date TEXT NOT NULL,
   registered_on TEXT,
+  reminder_sent_at TEXT,
   status TEXT NOT NULL DEFAULT 'registered' CHECK (status IN ('registered','cancelled','attended','absent')),
   payment_status TEXT NOT NULL DEFAULT 'unpaid' CHECK (payment_status IN ('unpaid','paid')),
   paid_at TEXT,
@@ -110,3 +111,17 @@ CREATE TABLE IF NOT EXISTS auth_login_limits (
   PRIMARY KEY (ip_hash, purpose, window_key)
 );
 
+
+
+-- Web Push device subscriptions.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  endpoint TEXT NOT NULL UNIQUE,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_push_subscriptions_student ON push_subscriptions(student_id);
+CREATE INDEX IF NOT EXISTS idx_bookings_reminder_due ON bookings(session_date, reminder_sent_at, status);

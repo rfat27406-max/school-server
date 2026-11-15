@@ -11,7 +11,12 @@
       "database_id": "cf7d2a59-db76-418d-9267-6a5864dc4234"
     }
   ],
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
   "vars": {
-    "ALLOWED_ORIGINS": "https://student-platform-ekt.pages.dev,https://admin-platform-dpb.pages.dev"
+    "ALLOWED_ORIGINS": "https://student-platform-ekt.pages.dev,https://admin-platform-dpb.pages.dev",
+    "VAPID_PUBLIC_KEY": "BDxJXmHDVraJRec4uX2Yaz__W1s6zSlePrw0a_F0aw_xh4QgFKT-JSJDCxtBrS5r4l9bfvPmJdHd2CvsiXTSeVU",
+    "VAPID_SUBJECT": "mailto:admin@example.com"
   }
 }

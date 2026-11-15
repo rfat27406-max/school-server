@@ -10,7 +10,8 @@
     "db:init:local": "wrangler d1 execute school-db --local --file=./schema.sql",
     "db:init:remote": "wrangler d1 execute school-db --remote --file=./schema.sql",
     "db:migrate:auth": "wrangler d1 execute school-db --remote --file=./migrations/0002_auth_teachers_notifications.sql",
-    "db:migrate:daily-limit": "wrangler d1 execute school-db --remote --file=./migrations/0003_student_daily_group_limit.sql"
+    "db:migrate:daily-limit": "wrangler d1 execute school-db --remote --file=./migrations/0003_student_daily_group_limit.sql",
+    "db:migrate:push": "wrangler d1 execute school-db --remote --file=./migrations/0004_web_push.sql"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"
