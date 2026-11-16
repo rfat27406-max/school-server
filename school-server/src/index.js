@@ -398,6 +398,44 @@ async function handle(request, env) {
     });
   }
 
+  // حالة طلب التسجيل: رمز عشوائي خاص بصاحب الطلب فقط.
+  if (path === "/api/registration/status" && request.method === "GET") {
+    const requestToken = bearer(request);
+    if (!requestToken) return json({ error: "رمز متابعة الطلب غير موجود." }, 401);
+    const requestHash = await sha256(requestToken);
+    const registration = await env.DB.prepare(`
+      SELECT id, first_name, last_name, status, rejection_reason, created_at, reviewed_at
+      FROM student_registration_requests WHERE token_hash = ? LIMIT 1
+    `).bind(requestHash).first();
+    if (!registration) return json({ error: "طلب التسجيل غير موجود أو أن رمز المتابعة غير صالح." }, 404);
+    return json({ registration });
+  }
+
+  // إنشاء جلسة التلميذ بعد اعتماد الطلب فقط.
+  if (path === "/api/registration/claim" && request.method === "POST") {
+    const requestToken = bearer(request);
+    if (!requestToken) return json({ error: "رمز متابعة الطلب غير موجود." }, 401);
+    const requestHash = await sha256(requestToken);
+    const registration = await env.DB.prepare(`
+      SELECT id, student_id, status, claimed_at FROM student_registration_requests
+      WHERE token_hash = ? LIMIT 1
+    `).bind(requestHash).first();
+    if (!registration || registration.status !== "approved" || !registration.student_id) {
+      return json({ error: "لم تتم الموافقة على طلبك بعد." }, 403);
+    }
+    const token = `${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
+    const result = await env.DB.prepare(`
+      INSERT INTO student_sessions (id, student_id, token_hash)
+      SELECT ?, ?, ? WHERE EXISTS (
+        SELECT 1 FROM student_registration_requests WHERE id = ? AND status = 'approved'
+      )
+    `).bind(crypto.randomUUID(), registration.student_id, await sha256(token), registration.id).run();
+    if (!result.meta?.changes) return json({ error: "تعذر تفعيل جلسة الحساب. أعد المحاولة." }, 409);
+    const student = await env.DB.prepare("SELECT id, first_name, last_name, age FROM students WHERE id = ?")
+      .bind(registration.student_id).first();
+    return json({ access_token: token, token_type: "Bearer", student });
+  }
+
   // جميع مسارات الإدارة تتطلب جلسة إدارة صالحة.
   let adminAuth = null;
   let teacherAuth = null;
@@ -605,6 +643,51 @@ async function handle(request, env) {
   // ==========================================
   // الإدارة العامة: جميع التلاميذ
   // ==========================================
+
+  // طلبات تسجيل التلاميذ الجديدة.
+  if (path === "/api/admin/registration-requests" && request.method === "GET") {
+    const { results } = await env.DB.prepare(`
+      SELECT id, first_name, last_name, age, status, created_at
+      FROM student_registration_requests
+      WHERE status = 'pending' ORDER BY created_at ASC
+    `).all();
+    return json({ requests: results });
+  }
+
+  const registrationDecision = path.match(/^\/api\/admin\/registration-requests\/([^/]+)\/decision$/);
+  if (registrationDecision && request.method === "POST") {
+    let body = {};
+    try { body = await request.json(); } catch {}
+    const decision = String(body.decision || "");
+    if (!["approve", "reject"].includes(decision)) return json({ error: "القرار غير صالح." }, 400);
+    const requestId = registrationDecision[1];
+    const pending = await env.DB.prepare(`SELECT * FROM student_registration_requests WHERE id = ? AND status = 'pending' LIMIT 1`)
+      .bind(requestId).first();
+    if (!pending) return json({ error: "الطلب غير موجود أو تمت مراجعته مسبقاً." }, 404);
+    if (decision === "reject") {
+      const reason = String(body.reason || "لم تتم الموافقة على طلب التسجيل.").trim().slice(0, 240);
+      await env.DB.batch([
+        env.DB.prepare(`UPDATE student_registration_requests SET status = 'rejected', rejection_reason = ?, reviewed_at = datetime('now') WHERE id = ? AND status = 'pending'`).bind(reason, requestId),
+        env.DB.prepare(`DELETE FROM student_name_registry WHERE normalized_name = ? AND owner_type = 'request' AND owner_id = ?`).bind(pending.normalized_name, requestId)
+      ]);
+      return json({ message: "تم رفض طلب التسجيل." });
+    }
+    const studentId = crypto.randomUUID();
+    try {
+      const approvalResults = await env.DB.batch([
+        env.DB.prepare(`UPDATE student_registration_requests SET status = 'approved', student_id = ?, reviewed_at = datetime('now') WHERE id = ? AND status = 'pending'`)
+          .bind(studentId, requestId),
+        env.DB.prepare(`INSERT INTO students (id, first_name, last_name, age) SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM student_registration_requests WHERE id = ? AND status = 'approved' AND student_id = ?)`)
+          .bind(studentId, pending.first_name, pending.last_name, pending.age, requestId, studentId),
+        env.DB.prepare(`UPDATE student_name_registry SET owner_type = 'student', owner_id = ? WHERE normalized_name = ? AND owner_type = 'request' AND owner_id = ?`)
+          .bind(studentId, pending.normalized_name, requestId)
+      ]);
+      if (!approvalResults[0]?.meta?.changes) return json({ error: "تمت مراجعة هذا الطلب مسبقاً." }, 409);
+    } catch (error) {
+      return json({ error: "تعذر اعتماد الطلب بسبب تعارض في بيانات الاسم. تحقق من قائمة التلاميذ." }, 409);
+    }
+    return json({ message: "تمت الموافقة على التلميذ وتفعيل حسابه." });
+  }
 
   if (
     path === "/api/admin/students" &&
@@ -1039,90 +1122,45 @@ async function handle(request, env) {
   }
 
   // ==========================================
-  // تسجيل تلميذ جديد
+  // استقبال طلب تسجيل تلميذ (لا يتم إنشاء حساب أو جلسة قبل الموافقة)
   // ==========================================
-
-  if (
-    path === "/api/students" &&
-    request.method === "POST"
-  ) {
+  if (path === "/api/students" && request.method === "POST") {
     let body;
-
-    try {
-      body = await request.json();
-    } catch {
-      return json({
-        error: "بيانات JSON غير صالحة."
-      }, 400);
-    }
-
-    const firstName = String(body.first_name || "").trim();
-    const lastName = String(body.last_name || "").trim();
+    try { body = await request.json(); }
+    catch { return json({ error: "بيانات JSON غير صالحة." }, 400); }
+    const firstName = String(body.first_name || "").normalize("NFKC").trim().replace(/\s+/g, " ");
+    const lastName = String(body.last_name || "").normalize("NFKC").trim().replace(/\s+/g, " ");
     const age = Number(body.age);
-
-    if (
-      !firstName ||
-      !lastName ||
-      firstName.length > 40 ||
-      lastName.length > 40 ||
-      !Number.isInteger(age) ||
-      age < 15 ||
-      age > 18
-    ) {
-      return json({
-        error: "أدخل الاسم واللقب، ويجب أن يكون العمر بين 15 و18 سنة."
-      }, 400);
+    if (!firstName || !lastName || firstName.length > 40 || lastName.length > 40 || !Number.isInteger(age) || age < 15 || age > 18) {
+      return json({ error: "أدخل الاسم واللقب، ويجب أن يكون العمر بين 15 و18 سنة." }, 400);
     }
-
-    // لا يوجد حد يومي لإنشاء الحسابات؛ الحد اليومي يخص التسجيل في الأفواج.
-
-    const studentId = crypto.randomUUID();
-
-    const token =
-      `${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
-
-    const tokenHash = await sha256(token);
-
-    await env.DB.batch([
-      env.DB.prepare(`
-        INSERT INTO students (
-          id,
-          first_name,
-          last_name,
-          age
-        )
-        VALUES (?, ?, ?, ?)
-      `).bind(
-        studentId,
-        firstName,
-        lastName,
-        age
-      ),
-
-      env.DB.prepare(`
-        INSERT INTO student_sessions (
-          id,
-          student_id,
-          token_hash
-        )
-        VALUES (?, ?, ?)
-      `).bind(
-        crypto.randomUUID(),
-        studentId,
-        tokenHash
-      )
-    ]);
-
+    const normalizedName = `${firstName} ${lastName}`.normalize("NFKC").toLocaleLowerCase("ar").replace(/\s+/g, " ").trim();
+    // فحص الحسابات الموجودة بتطبيع مطابق للتطبيع المستخدم في الطلبات الجديدة.
+    // هذا يغطي المسافات المتكررة وأشكال Unicode التي لا يعالجها SQLite lower/trim وحدهما.
+    const existingStudents = await env.DB.prepare(`SELECT id, first_name, last_name FROM students`).all();
+    const duplicateStudent = (existingStudents.results || []).some(student => {
+      const storedName = `${student.first_name || ""} ${student.last_name || ""}`
+        .normalize("NFKC").toLocaleLowerCase("ar").replace(/\s+/g, " ").trim();
+      return storedName === normalizedName;
+    });
+    if (duplicateStudent) return json({ error: "يوجد تلميذ مسجل بهذا الاسم واللقب مسبقاً." }, 409);
+    const requestId = crypto.randomUUID();
+    const requestToken = `${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
+    try {
+      await env.DB.batch([
+        env.DB.prepare(`INSERT INTO student_name_registry (normalized_name, owner_type, owner_id) VALUES (?, 'request', ?)`)
+          .bind(normalizedName, requestId),
+        env.DB.prepare(`INSERT INTO student_registration_requests (id, first_name, last_name, age, normalized_name, token_hash) VALUES (?, ?, ?, ?, ?, ?)`)
+          .bind(requestId, firstName, lastName, age, normalizedName, await sha256(requestToken))
+      ]);
+    } catch (error) {
+      return json({ error: "هذا الاسم واللقب مسجلان بالفعل أو يوجد طلب سابق قيد المراجعة." }, 409);
+    }
     return json({
-      student: {
-        id: studentId,
-        first_name: firstName,
-        last_name: lastName,
-        age
-      },
-      access_token: token,
-      token_type: "Bearer",
-      note: "احتفظ برمز الدخول. استعادة الحساب تحتاج إضافة وسيلة تحقق في مرحلة لاحقة."
+      request: { id: requestId, first_name: firstName, last_name: lastName, age, status: "pending" },
+      request_token: requestToken,
+      status: "pending",
+      message: "تم إرسال طلبك بنجاح. حسابك قيد مراجعة الإدارة."
     }, 201);
   }
 

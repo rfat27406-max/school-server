@@ -39,3 +39,17 @@ Cloudflare Worker API لمنصة مدرستي، مع قاعدة بيانات Clo
 6. اختبر بإرسال إشعار عام من الإدارة. تذكير الحصة يُرسل آلياً قبل 30 دقيقة تقريباً وفق توقيت الجزائر، ويُعالج الخادم الحجوزات مرة كل خمس دقائق.
 
 لا تضع `VAPID_PRIVATE_JWK` داخل ملفات الواجهة أو المستودع. إذا غيّرت زوج مفاتيح VAPID لاحقاً، يجب على الأجهزة إعادة الاشتراك بالمفتاح العام الجديد.
+
+## Student registration approval (v0005)
+
+- `POST /api/students` creates a pending request only; it does not create a student row or a student session.
+- `GET /api/registration/status` checks the request using its private bearer token.
+- `POST /api/registration/claim` creates a student session only after approval.
+- `GET /api/admin/registration-requests` and `POST /api/admin/registration-requests/:id/decision` are protected by administrator authentication.
+- The unique key in `student_name_registry` reserves a normalized full name while a request is pending and after approval. Rejection releases the reservation.
+
+The migration file is `migrations/0005_student_registration_approval.sql`. It has already been applied manually through Cloudflare D1 Console in this deployment workflow. Do not run it again if the tables/index already exist; its statements are idempotent, but the initial population only inserts missing registry keys. For a fresh database, execute the complete migration once in D1 Console before deploying the Worker.
+
+## Deploy without a Cloudflare terminal
+
+Push the Worker project files to the connected GitHub repository and let the configured Cloudflare deployment run. Keep `wrangler.jsonc` and its D1 binding intact. Never commit Worker secrets such as `ADMIN_PASSWORD`, `RATE_LIMIT_SECRET`, `BOUMDIENE_INITIAL_PASSWORD`, or `VAPID_PRIVATE_JWK`.
