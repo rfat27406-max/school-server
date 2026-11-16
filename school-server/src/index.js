@@ -648,6 +648,8 @@ async function handle(request, env) {
         s.last_name,
         s.age,
         s.created_at,
+        s.approval_status,
+        s.rejection_count,
         COUNT(b.id) AS bookings_count,
         COALESCE(SUM(
           CASE
