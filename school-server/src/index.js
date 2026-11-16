@@ -266,7 +266,9 @@ async function sendWebPush(subscription, payload, env) {
     },
     body
   });
-  async function pushToStudents(env, studentId, payload) {
+}
+
+async function pushToStudents(env, studentId, payload) {
   const query = studentId
     ? env.DB.prepare("SELECT id, student_id, endpoint, p256dh, auth FROM push_subscriptions WHERE student_id = ?").bind(studentId)
     : env.DB.prepare("SELECT id, student_id, endpoint, p256dh, auth FROM push_subscriptions");
@@ -1390,4 +1392,3 @@ export default {
     await deliverUpcomingLessonReminders(env);
   }
 };
-}
