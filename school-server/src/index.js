@@ -1,3 +1,4 @@
+
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
 const FIXED_SESSION_PRICE_DZD = 300;
@@ -267,7 +268,6 @@ async function sendWebPush(subscription, payload, env) {
     body
   });
 }
-
 async function pushToStudents(env, studentId, payload) {
   const query = studentId
     ? env.DB.prepare("SELECT id, student_id, endpoint, p256dh, auth FROM push_subscriptions WHERE student_id = ?").bind(studentId)
@@ -315,9 +315,7 @@ async function deliverUpcomingLessonReminders(env) {
       tag: `lesson-reminder-${booking.booking_id}`,
       kind: "lesson-reminder"
     });
-    // لا نسجل التذكير على أنه أُرسل إلا إذا وُجد اشتراك واحد على الأقل
-    // ونجح الإرسال إلى جهاز واحد على الأقل.
-    if (delivery.attempted > 0 && delivery.sent > 0) {
+    if (delivery.failed === 0) {
       await env.DB.prepare("UPDATE bookings SET reminder_sent_at = datetime('now') WHERE id = ? AND reminder_sent_at IS NULL")
         .bind(booking.booking_id).run();
     }
