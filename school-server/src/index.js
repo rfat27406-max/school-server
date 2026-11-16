@@ -674,12 +674,26 @@ async function handle(request, env) {
     }
     const studentId = crypto.randomUUID();
     try {
+      // Insert the student before assigning student_id to the request.
+      // student_registration_requests.student_id has a foreign key to students(id),
+      // so the previous order violated the FK constraint on approval.
+      // D1 batch executes these statements atomically: any failure rolls back all of them.
       const approvalResults = await env.DB.batch([
-        env.DB.prepare(`UPDATE student_registration_requests SET status = 'approved', student_id = ?, reviewed_at = datetime('now') WHERE id = ? AND status = 'pending'`)
-          .bind(studentId, requestId),
-        env.DB.prepare(`INSERT INTO students (id, first_name, last_name, age) SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM student_registration_requests WHERE id = ? AND status = 'approved' AND student_id = ?)`)
-          .bind(studentId, pending.first_name, pending.last_name, pending.age, requestId, studentId),
-        env.DB.prepare(`UPDATE student_name_registry SET owner_type = 'student', owner_id = ? WHERE normalized_name = ? AND owner_type = 'request' AND owner_id = ?`)
+        env.DB.prepare(`INSERT INTO students (id, first_name, last_name, age)
+          SELECT ?, ?, ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM student_registration_requests
+            WHERE id = ? AND status = 'pending'
+          )`)
+          .bind(studentId, pending.first_name, pending.last_name, pending.age, requestId),
+        env.DB.prepare(`UPDATE student_registration_requests
+          SET status = 'approved', student_id = ?, reviewed_at = datetime('now')
+          WHERE id = ? AND status = 'pending'
+          AND EXISTS (SELECT 1 FROM students WHERE id = ?)`)
+          .bind(studentId, requestId, studentId),
+        env.DB.prepare(`UPDATE student_name_registry
+          SET owner_type = 'student', owner_id = ?
+          WHERE normalized_name = ? AND owner_type = 'request' AND owner_id = ?`)
           .bind(studentId, pending.normalized_name, requestId)
       ]);
       if (!approvalResults[0]?.meta?.changes) return json({ error: "تمت مراجعة هذا الطلب مسبقاً." }, 409);
