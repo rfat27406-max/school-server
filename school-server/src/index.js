@@ -171,12 +171,26 @@ async function authenticatedStudent(request, env) {
     SELECT s.id, s.first_name, s.last_name, s.age
     FROM student_sessions ss
     JOIN students s ON s.id = ss.student_id
-    WHERE ss.token_hash = ?
+    WHERE s.approval_status = 'approved'
+      AND ss.token_hash = ?
       AND ss.revoked_at IS NULL
       AND (
         ss.expires_at IS NULL
         OR ss.expires_at > datetime('now')
       )
+    LIMIT 1
+  `).bind(tokenHash).first();
+}
+
+async function authenticatedStudentAny(request, env) {
+  const token = bearer(request);
+  if (!token) return null;
+  const tokenHash = await sha256(token);
+  return env.DB.prepare(`
+    SELECT s.id, s.first_name, s.last_name, s.age, s.approval_status, s.rejection_count
+    FROM student_sessions ss JOIN students s ON s.id = ss.student_id
+    WHERE ss.token_hash = ? AND ss.revoked_at IS NULL
+      AND (ss.expires_at IS NULL OR ss.expires_at > datetime('now'))
     LIMIT 1
   `).bind(tokenHash).first();
 }
@@ -266,7 +280,8 @@ async function sendWebPush(subscription, payload, env) {
     },
     body
   });
-  async function pushToStudents(env, studentId, payload) {
+}
+async function pushToStudents(env, studentId, payload) {
   const query = studentId
     ? env.DB.prepare("SELECT id, student_id, endpoint, p256dh, auth FROM push_subscriptions WHERE student_id = ?").bind(studentId)
     : env.DB.prepare("SELECT id, student_id, endpoint, p256dh, auth FROM push_subscriptions");
@@ -605,6 +620,22 @@ async function handle(request, env) {
   // ==========================================
   // الإدارة العامة: جميع التلاميذ
   // ==========================================
+
+  const studentDecisionMatch = path.match(/^\/api\/admin\/students\/([^/]+)\/(approve|reject)$/);
+  if (studentDecisionMatch && request.method === "POST") {
+    const studentId = studentDecisionMatch[1], decision = studentDecisionMatch[2];
+    const student = await env.DB.prepare("SELECT id, approval_status, rejection_count FROM students WHERE id = ?").bind(studentId).first();
+    if (!student) return json({ error: "التلميذ غير موجود." }, 404);
+    if (student.approval_status !== "pending") return json({ error: "هذا الطلب ليس قيد المراجعة." }, 409);
+    if (decision === "approve") {
+      await env.DB.prepare("UPDATE students SET approval_status = 'approved' WHERE id = ? AND approval_status = 'pending'").bind(studentId).run();
+      return json({ message: "تم قبول طلب التفعيل." });
+    }
+    const count = Number(student.rejection_count || 0) + 1;
+    const status = count >= 3 ? "locked" : "rejected";
+    await env.DB.prepare("UPDATE students SET rejection_count = ?, approval_status = ? WHERE id = ? AND approval_status = 'pending'").bind(count, status, studentId).run();
+    return json({ message: status === "locked" ? "رُفض الطلب للمرة الثالثة وأُغلق الحساب نهائياً." : `تم رفض الطلب. تبقت ${3-count} محاولات.`, rejection_count: count, status });
+  }
 
   if (
     path === "/api/admin/students" &&
@@ -1074,59 +1105,42 @@ async function handle(request, env) {
       }, 400);
     }
 
-    // لا يوجد حد يومي لإنشاء الحسابات؛ الحد اليومي يخص التسجيل في الأفواج.
-
+    // إنشاء طلب تفعيل؛ لا يسمح بالدخول قبل موافقة الإدارة.
     const studentId = crypto.randomUUID();
-
-    const token =
-      `${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
-
+    const token = `${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
     const tokenHash = await sha256(token);
-
     await env.DB.batch([
-      env.DB.prepare(`
-        INSERT INTO students (
-          id,
-          first_name,
-          last_name,
-          age
-        )
-        VALUES (?, ?, ?, ?)
-      `).bind(
-        studentId,
-        firstName,
-        lastName,
-        age
-      ),
-
-      env.DB.prepare(`
-        INSERT INTO student_sessions (
-          id,
-          student_id,
-          token_hash
-        )
-        VALUES (?, ?, ?)
-      `).bind(
-        crypto.randomUUID(),
-        studentId,
-        tokenHash
-      )
+      env.DB.prepare(`INSERT INTO students (id, first_name, last_name, age, approval_status, rejection_count)
+        VALUES (?, ?, ?, ?, 'pending', 0)`).bind(studentId, firstName, lastName, age),
+      env.DB.prepare(`INSERT INTO student_sessions (id, student_id, token_hash) VALUES (?, ?, ?)`)
+        .bind(crypto.randomUUID(), studentId, tokenHash)
     ]);
-
     return json({
-      student: {
-        id: studentId,
-        first_name: firstName,
-        last_name: lastName,
-        age
-      },
-      access_token: token,
-      token_type: "Bearer",
-      note: "احتفظ برمز الدخول. استعادة الحساب تحتاج إضافة وسيلة تحقق في مرحلة لاحقة."
+      student: { id: studentId, first_name: firstName, last_name: lastName, age },
+      access_token: token, status: "pending",
+      message: "تم إرسال طلب التفعيل إلى المدير. انتظر مراجعة الطلب."
     }, 201);
   }
 
   // ==========================================
+  if (path === "/api/student-registration/status" && request.method === "GET") {
+    const student = await authenticatedStudentAny(request, env);
+    if (!student) return json({ error: "جلسة الطلب غير صالحة." }, 401);
+    return json({ status: student.approval_status, rejection_count: Number(student.rejection_count || 0),
+      remaining_attempts: Math.max(0, 3 - Number(student.rejection_count || 0)) });
+  }
+
+  if (path === "/api/student-registration/retry" && request.method === "POST") {
+    const student = await authenticatedStudentAny(request, env);
+    if (!student) return json({ error: "جلسة الطلب غير صالحة." }, 401);
+    if (student.approval_status === "approved") return json({ error: "حسابك مفعل بالفعل." }, 409);
+    if (Number(student.rejection_count || 0) >= 3 || student.approval_status === "locked")
+      return json({ error: "تم استنفاد المحاولات الثلاث. لا يمكن إعادة إرسال الطلب." }, 403);
+    if (student.approval_status !== "rejected") return json({ error: "طلبك قيد المراجعة بالفعل." }, 409);
+    await env.DB.prepare("UPDATE students SET approval_status = 'pending' WHERE id = ? AND approval_status = 'rejected' AND rejection_count < 3").bind(student.id).run();
+    return json({ status: "pending", message: "تمت إعادة إرسال طلب التفعيل." });
+  }
+
   // بيانات التلميذ الحالي
   // ==========================================
 
@@ -1390,4 +1404,3 @@ export default {
     await deliverUpcomingLessonReminders(env);
   }
 };
-}
