@@ -321,6 +321,38 @@ async function deliverUpcomingLessonReminders(env) {
   }
 }
 
+// أرشفة تسجيلات الحصص بعد انتهائها مع الاحتفاظ بسجل الدفع.
+// تعتمد المقارنة على توقيت الجزائر، ولا تحذف أي سجل من قاعدة البيانات.
+async function archiveExpiredBookings(env) {
+  const now = localNow();
+  const today = `${now.year}-${now.month}-${now.day}`;
+  const currentMinutes = Number(now.hour) * 60 + Number(now.minute);
+
+  const result = await env.DB.prepare(`
+    UPDATE bookings
+    SET archived_at = datetime('now')
+    WHERE archived_at IS NULL
+      AND status != 'cancelled'
+      AND EXISTS (
+        SELECT 1
+        FROM groups g
+        WHERE g.id = bookings.group_id
+          AND (
+            bookings.session_date < ?
+            OR (
+              bookings.session_date = ?
+              AND (
+                CAST(substr(g.end_time, 1, 2) AS INTEGER) * 60
+                + CAST(substr(g.end_time, 4, 2) AS INTEGER)
+              ) <= ?
+            )
+          )
+      )
+  `).bind(today, today, currentMinutes).run();
+
+  return Number(result?.meta?.changes || 0);
+}
+
 async function handle(request, env) {
   
 function teacherNameCode(name) {
@@ -856,6 +888,7 @@ async function generateTeacherId(env, name) {
           FROM bookings b
           WHERE b.group_id = g.id
             AND b.status != 'cancelled'
+            AND b.archived_at IS NULL
         ) AS bookings_count
       FROM groups g
       JOIN teachers t ON t.id = g.teacher_id
@@ -1008,6 +1041,7 @@ async function generateTeacherId(env, name) {
       WHERE b.group_id = ?
         AND g.teacher_id = ?
         AND b.status != 'cancelled'
+        AND b.archived_at IS NULL
     `;
 
     const bindings = [groupId, teacherAuth.id];
@@ -1390,7 +1424,7 @@ if (sessionDate === today) {
 
   if (nowMinutes >= endMinutes) {
     return json({
-      error: "انتهى وقت هذه الحصة، لا يمكن التسجيل فيها."
+      error: "لقد انتهت مدة التسجيل."
     }, 400);
   }
 }
@@ -1464,6 +1498,7 @@ export default {
     }
   },
   async scheduled(controller, env, ctx) {
+    await archiveExpiredBookings(env);
     await deliverUpcomingLessonReminders(env);
   }
 };
