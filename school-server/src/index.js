@@ -1,4 +1,3 @@
-
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
 const FIXED_SESSION_PRICE_DZD = 300;
@@ -191,7 +190,7 @@ function registrationWindowIsOpen(now) {
     Number(now.hour) * 60 +
     Number(now.minute);
 
-  return allowedDay && minutes >= 480 && minutes < 1200;
+  return allowedDay && minutes >= 450 && minutes < 960;
 }
 
 
@@ -315,7 +314,9 @@ async function deliverUpcomingLessonReminders(env) {
       tag: `lesson-reminder-${booking.booking_id}`,
       kind: "lesson-reminder"
     });
-    if (delivery.failed === 0) {
+    // لا نسجل التذكير على أنه أُرسل إلا إذا وُجد اشتراك واحد على الأقل
+    // ونجح الإرسال إلى جهاز واحد على الأقل.
+    if (delivery.attempted > 0 && delivery.sent > 0) {
       await env.DB.prepare("UPDATE bookings SET reminder_sent_at = datetime('now') WHERE id = ? AND reminder_sent_at IS NULL")
         .bind(booking.booking_id).run();
     }
@@ -323,45 +324,6 @@ async function deliverUpcomingLessonReminders(env) {
 }
 
 async function handle(request, env) {
-  
-function teacherNameCode(name) {
-  const map = {
-    "ا": "A", "أ": "A", "إ": "E", "آ": "A",
-    "ب": "B", "ت": "T", "ث": "TH", "ج": "J",
-    "ح": "H", "خ": "KH", "د": "D", "ذ": "DH",
-    "ر": "R", "ز": "Z", "س": "S", "ش": "SH",
-    "ص": "S", "ض": "D", "ط": "T", "ظ": "Z",
-    "ع": "A", "غ": "GH", "ف": "F", "ق": "Q",
-    "ك": "K", "ل": "L", "م": "M", "ن": "N",
-    "ه": "H", "و": "W", "ي": "Y", "ى": "A"
-  };
-
-  const clean = name.trim().toUpperCase();
-  const latin = clean.replace(/[ء-ي]/g, char => map[char] || "");
-
-  return latin.replace(/[^A-Z]/g, "").slice(0, 3).padEnd(3, "X");
-}
-
-async function generateTeacherId(env, name) {
-  const prefix = `TCH-${teacherNameCode(name)}`;
-
-  const { results } = await env.DB.prepare(`
-    SELECT id FROM teachers
-    WHERE id LIKE ?
-  `).bind(`${prefix}-%`).all();
-
-  let maxNumber = 0;
-
-  for (const teacher of results || []) {
-    const match = teacher.id.match(/-(\d+)$/);
-    if (match) {
-      maxNumber = Math.max(maxNumber, Number(match[1]));
-    }
-  }
-
-  return `${prefix}-${String(maxNumber + 1).padStart(2, "0")}`;
-}
-
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
@@ -437,44 +399,6 @@ async function generateTeacherId(env, name) {
     });
   }
 
-  // حالة طلب التسجيل: رمز عشوائي خاص بصاحب الطلب فقط.
-  if (path === "/api/registration/status" && request.method === "GET") {
-    const requestToken = bearer(request);
-    if (!requestToken) return json({ error: "رمز متابعة الطلب غير موجود." }, 401);
-    const requestHash = await sha256(requestToken);
-    const registration = await env.DB.prepare(`
-      SELECT id, first_name, last_name, status, rejection_reason, created_at, reviewed_at
-      FROM student_registration_requests WHERE token_hash = ? LIMIT 1
-    `).bind(requestHash).first();
-    if (!registration) return json({ error: "طلب التسجيل غير موجود أو أن رمز المتابعة غير صالح." }, 404);
-    return json({ registration });
-  }
-
-  // إنشاء جلسة التلميذ بعد اعتماد الطلب فقط.
-  if (path === "/api/registration/claim" && request.method === "POST") {
-    const requestToken = bearer(request);
-    if (!requestToken) return json({ error: "رمز متابعة الطلب غير موجود." }, 401);
-    const requestHash = await sha256(requestToken);
-    const registration = await env.DB.prepare(`
-      SELECT id, student_id, status, claimed_at FROM student_registration_requests
-      WHERE token_hash = ? LIMIT 1
-    `).bind(requestHash).first();
-    if (!registration || registration.status !== "approved" || !registration.student_id) {
-      return json({ error: "لم تتم الموافقة على طلبك بعد." }, 403);
-    }
-    const token = `${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
-    const result = await env.DB.prepare(`
-      INSERT INTO student_sessions (id, student_id, token_hash)
-      SELECT ?, ?, ? WHERE EXISTS (
-        SELECT 1 FROM student_registration_requests WHERE id = ? AND status = 'approved'
-      )
-    `).bind(crypto.randomUUID(), registration.student_id, await sha256(token), registration.id).run();
-    if (!result.meta?.changes) return json({ error: "تعذر تفعيل جلسة الحساب. أعد المحاولة." }, 409);
-    const student = await env.DB.prepare("SELECT id, first_name, last_name, age FROM students WHERE id = ?")
-      .bind(registration.student_id).first();
-    return json({ access_token: token, token_type: "Bearer", student });
-  }
-
   // جميع مسارات الإدارة تتطلب جلسة إدارة صالحة.
   let adminAuth = null;
   let teacherAuth = null;
@@ -485,7 +409,27 @@ async function generateTeacherId(env, name) {
   if (path.startsWith("/api/teacher/") && path !== "/api/teacher/login") {
     teacherAuth = await authenticatedTeacher(request, env);
 
-    if (!teacherAuth) return json({ error: "يلزم تسجيل دخول الأستاذ بكلمة مروره الخاصة." }, 401);
+    // الإدارة تستطيع اختيار أي أستاذ لعرض فضائه، بينما الأستاذ العادي
+    // يبقى محصوراً في هويته المستخرجة من جلسة الدخول.
+    if (!teacherAuth) {
+      adminAuth = adminAuth || await authenticatedAdmin(request, env);
+      if (adminAuth) {
+        const requestedTeacherId = String(
+          url.searchParams.get("teacher_id") || "teacher-boumediene"
+        );
+        teacherAuth = await env.DB.prepare(`
+          SELECT id, name, subject, education_level
+          FROM teachers
+          WHERE id = ? AND active = 1
+          LIMIT 1
+        `).bind(requestedTeacherId).first();
+        if (!teacherAuth) {
+          return json({ error: "الأستاذ المحدد غير موجود أو غير نشط." }, 404);
+        }
+      }
+    }
+
+    if (!teacherAuth) return json({ error: "يلزم تسجيل دخول الأستاذ." }, 401);
   }
 
   // Save or refresh this student's Web Push subscription.
@@ -553,7 +497,7 @@ async function generateTeacherId(env, name) {
     if (!name || !subject || !level || password.length < 6) {
       return json({ error: "أدخل اسم الأستاذ والمادة والمستوى وكلمة مرور من 6 أحرف على الأقل." }, 400);
     }
-    const id = await generateTeacherId(env, name);
+    const id = `teacher-${crypto.randomUUID()}`;
     await env.DB.prepare(`
       INSERT INTO teachers (id, name, subject, education_level, password_hash)
       VALUES (?, ?, ?, ?, ?)
@@ -579,7 +523,6 @@ async function generateTeacherId(env, name) {
     let body = {};
     try { body = await request.json(); } catch {}
     const teacherId = String(body.teacher_id || "");
-    const teacherPassword = String(body.teacher_password || "");
     const name = String(body.name || "").trim();
     const weekday = String(body.weekday || "");
     const start = String(body.start_time || "");
@@ -591,12 +534,8 @@ async function generateTeacherId(env, name) {
         !Number.isInteger(price) || price < 0) {
       return json({ error: "بيانات الفوج غير صالحة." }, 400);
     }
-    const teacher = await env.DB.prepare("SELECT id, password_hash FROM teachers WHERE id = ? AND active = 1").bind(teacherId).first();
+    const teacher = await env.DB.prepare("SELECT id FROM teachers WHERE id = ? AND active = 1").bind(teacherId).first();
     if (!teacher) return json({ error: "الأستاذ غير موجود." }, 404);
-    if (!teacherPassword || !teacher.password_hash ||
-        !constantTimeEqual(await sha256(teacherPassword), teacher.password_hash)) {
-      return json({ error: "كود الأستاذ غير صحيح؛ لم يتم إنشاء الفوج." }, 401);
-    }
     const result = await env.DB.prepare(`
       INSERT INTO groups (teacher_id, name, weekday, start_time, end_time, price_dzd)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -667,65 +606,6 @@ async function generateTeacherId(env, name) {
   // ==========================================
   // الإدارة العامة: جميع التلاميذ
   // ==========================================
-
-  // طلبات تسجيل التلاميذ الجديدة.
-  if (path === "/api/admin/registration-requests" && request.method === "GET") {
-    const { results } = await env.DB.prepare(`
-      SELECT id, first_name, last_name, age, status, created_at
-      FROM student_registration_requests
-      WHERE status = 'pending' ORDER BY created_at ASC
-    `).all();
-    return json({ requests: results });
-  }
-
-  const registrationDecision = path.match(/^\/api\/admin\/registration-requests\/([^/]+)\/decision$/);
-  if (registrationDecision && request.method === "POST") {
-    let body = {};
-    try { body = await request.json(); } catch {}
-    const decision = String(body.decision || "");
-    if (!["approve", "reject"].includes(decision)) return json({ error: "القرار غير صالح." }, 400);
-    const requestId = registrationDecision[1];
-    const pending = await env.DB.prepare(`SELECT * FROM student_registration_requests WHERE id = ? AND status = 'pending' LIMIT 1`)
-      .bind(requestId).first();
-    if (!pending) return json({ error: "الطلب غير موجود أو تمت مراجعته مسبقاً." }, 404);
-    if (decision === "reject") {
-      const reason = String(body.reason || "لم تتم الموافقة على طلب التسجيل.").trim().slice(0, 240);
-      await env.DB.batch([
-        env.DB.prepare(`UPDATE student_registration_requests SET status = 'rejected', rejection_reason = ?, reviewed_at = datetime('now') WHERE id = ? AND status = 'pending'`).bind(reason, requestId),
-        env.DB.prepare(`DELETE FROM student_name_registry WHERE normalized_name = ? AND owner_type = 'request' AND owner_id = ?`).bind(pending.normalized_name, requestId)
-      ]);
-      return json({ message: "تم رفض طلب التسجيل." });
-    }
-    const studentId = crypto.randomUUID();
-    try {
-      // Insert the student before assigning student_id to the request.
-      // student_registration_requests.student_id has a foreign key to students(id),
-      // so the previous order violated the FK constraint on approval.
-      // D1 batch executes these statements atomically: any failure rolls back all of them.
-      const approvalResults = await env.DB.batch([
-        env.DB.prepare(`INSERT INTO students (id, first_name, last_name, age)
-          SELECT ?, ?, ?, ?
-          WHERE EXISTS (
-            SELECT 1 FROM student_registration_requests
-            WHERE id = ? AND status = 'pending'
-          )`)
-          .bind(studentId, pending.first_name, pending.last_name, pending.age, requestId),
-        env.DB.prepare(`UPDATE student_registration_requests
-          SET status = 'approved', student_id = ?, reviewed_at = datetime('now')
-          WHERE id = ? AND status = 'pending'
-          AND EXISTS (SELECT 1 FROM students WHERE id = ?)`)
-          .bind(studentId, requestId, studentId),
-        env.DB.prepare(`UPDATE student_name_registry
-          SET owner_type = 'student', owner_id = ?
-          WHERE normalized_name = ? AND owner_type = 'request' AND owner_id = ?`)
-          .bind(studentId, pending.normalized_name, requestId)
-      ]);
-      if (!approvalResults[0]?.meta?.changes) return json({ error: "تمت مراجعة هذا الطلب مسبقاً." }, 409);
-    } catch (error) {
-      return json({ error: "تعذر اعتماد الطلب بسبب تعارض في بيانات الاسم. تحقق من قائمة التلاميذ." }, 409);
-    }
-    return json({ message: "تمت الموافقة على التلميذ وتفعيل حسابه." });
-  }
 
   if (
     path === "/api/admin/students" &&
@@ -1160,45 +1040,90 @@ async function generateTeacherId(env, name) {
   }
 
   // ==========================================
-  // استقبال طلب تسجيل تلميذ (لا يتم إنشاء حساب أو جلسة قبل الموافقة)
+  // تسجيل تلميذ جديد
   // ==========================================
-  if (path === "/api/students" && request.method === "POST") {
+
+  if (
+    path === "/api/students" &&
+    request.method === "POST"
+  ) {
     let body;
-    try { body = await request.json(); }
-    catch { return json({ error: "بيانات JSON غير صالحة." }, 400); }
-    const firstName = String(body.first_name || "").normalize("NFKC").trim().replace(/\s+/g, " ");
-    const lastName = String(body.last_name || "").normalize("NFKC").trim().replace(/\s+/g, " ");
-    const age = Number(body.age);
-    if (!firstName || !lastName || firstName.length > 40 || lastName.length > 40 || !Number.isInteger(age) || age < 15 || age > 18) {
-      return json({ error: "أدخل الاسم واللقب، ويجب أن يكون العمر بين 15 و18 سنة." }, 400);
-    }
-    const normalizedName = `${firstName} ${lastName}`.normalize("NFKC").toLocaleLowerCase("ar").replace(/\s+/g, " ").trim();
-    // فحص الحسابات الموجودة بتطبيع مطابق للتطبيع المستخدم في الطلبات الجديدة.
-    // هذا يغطي المسافات المتكررة وأشكال Unicode التي لا يعالجها SQLite lower/trim وحدهما.
-    const existingStudents = await env.DB.prepare(`SELECT id, first_name, last_name FROM students`).all();
-    const duplicateStudent = (existingStudents.results || []).some(student => {
-      const storedName = `${student.first_name || ""} ${student.last_name || ""}`
-        .normalize("NFKC").toLocaleLowerCase("ar").replace(/\s+/g, " ").trim();
-      return storedName === normalizedName;
-    });
-    if (duplicateStudent) return json({ error: "يوجد تلميذ مسجل بهذا الاسم واللقب مسبقاً." }, 409);
-    const requestId = crypto.randomUUID();
-    const requestToken = `${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
+
     try {
-      await env.DB.batch([
-        env.DB.prepare(`INSERT INTO student_name_registry (normalized_name, owner_type, owner_id) VALUES (?, 'request', ?)`)
-          .bind(normalizedName, requestId),
-        env.DB.prepare(`INSERT INTO student_registration_requests (id, first_name, last_name, age, normalized_name, token_hash) VALUES (?, ?, ?, ?, ?, ?)`)
-          .bind(requestId, firstName, lastName, age, normalizedName, await sha256(requestToken))
-      ]);
-    } catch (error) {
-      return json({ error: "هذا الاسم واللقب مسجلان بالفعل أو يوجد طلب سابق قيد المراجعة." }, 409);
+      body = await request.json();
+    } catch {
+      return json({
+        error: "بيانات JSON غير صالحة."
+      }, 400);
     }
+
+    const firstName = String(body.first_name || "").trim();
+    const lastName = String(body.last_name || "").trim();
+    const age = Number(body.age);
+
+    if (
+      !firstName ||
+      !lastName ||
+      firstName.length > 40 ||
+      lastName.length > 40 ||
+      !Number.isInteger(age) ||
+      age < 15 ||
+      age > 18
+    ) {
+      return json({
+        error: "أدخل الاسم واللقب، ويجب أن يكون العمر بين 15 و18 سنة."
+      }, 400);
+    }
+
+    // لا يوجد حد يومي لإنشاء الحسابات؛ الحد اليومي يخص التسجيل في الأفواج.
+
+    const studentId = crypto.randomUUID();
+
+    const token =
+      `${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
+
+    const tokenHash = await sha256(token);
+
+    await env.DB.batch([
+      env.DB.prepare(`
+        INSERT INTO students (
+          id,
+          first_name,
+          last_name,
+          age
+        )
+        VALUES (?, ?, ?, ?)
+      `).bind(
+        studentId,
+        firstName,
+        lastName,
+        age
+      ),
+
+      env.DB.prepare(`
+        INSERT INTO student_sessions (
+          id,
+          student_id,
+          token_hash
+        )
+        VALUES (?, ?, ?)
+      `).bind(
+        crypto.randomUUID(),
+        studentId,
+        tokenHash
+      )
+    ]);
+
     return json({
-      request: { id: requestId, first_name: firstName, last_name: lastName, age, status: "pending" },
-      request_token: requestToken,
-      status: "pending",
-      message: "تم إرسال طلبك بنجاح. حسابك قيد مراجعة الإدارة."
+      student: {
+        id: studentId,
+        first_name: firstName,
+        last_name: lastName,
+        age
+      },
+      access_token: token,
+      token_type: "Bearer",
+      note: "احتفظ برمز الدخول. استعادة الحساب تحتاج إضافة وسيلة تحقق في مرحلة لاحقة."
     }, 201);
   }
 
@@ -1384,13 +1309,14 @@ async function generateTeacherId(env, name) {
         Number(now.hour) * 60 +
         Number(now.minute);
 
-      const startMinutes =
-        Number(group.start_time.slice(0, 2)) * 60 +
-        Number(group.start_time.slice(3, 5));
+      const endMinutes =
+        Number(group.end_time.slice(0, 2)) * 60 +
+        Number(group.end_time.slice(3, 5));
 
-      if (startMinutes <= nowMinutes) {
+      // التسجيل مسموح قبل الحصة وأثناءها، ويُمنع عند وقت النهاية تماماً.
+      if (nowMinutes >= endMinutes) {
         return json({
-          error: "بدأت هذه الحصة أو انتهى موعدها."
+          error: "انتهى وقت هذه الحصة، لا يمكن التسجيل فيها."
         }, 400);
       }
     }
