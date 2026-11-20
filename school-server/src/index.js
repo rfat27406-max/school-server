@@ -190,7 +190,8 @@ function registrationWindowIsOpen(now) {
     Number(now.hour) * 60 +
     Number(now.minute);
 
-  return allowedDay && minutes >= 480 && minutes < 1800;
+  // الجمعة والسبت فقط: من 07:30 إلى ما قبل 23:00 بتوقيت الجزائر.
+  return allowedDay && minutes >= 450 && minutes < 1380;
 }
 
 
@@ -321,7 +322,7 @@ async function deliverUpcomingLessonReminders(env) {
   }
 }
 
-// أرشفة تسجيلات الحصص بعد انتهائها مع الاحتفاظ بسجل الدفع.
+// أرشفة تسجيلات الحصة بعد مرور 30 دقيقة على نهايتها، مع الاحتفاظ بسجل الدفع.
 // تعتمد المقارنة على توقيت الجزائر، ولا تحذف أي سجل من قاعدة البيانات.
 async function archiveExpiredBookings(env) {
   const now = localNow();
@@ -344,6 +345,7 @@ async function archiveExpiredBookings(env) {
               AND (
                 CAST(substr(g.end_time, 1, 2) AS INTEGER) * 60
                 + CAST(substr(g.end_time, 4, 2) AS INTEGER)
+                + 30
               ) <= ?
             )
           )
@@ -1398,10 +1400,10 @@ async function generateTeacherId(env, name) {
 
     const now = localNow();
 
-    // التحقق من نافذة التسجيل: الجمعة والسبت من 08:00 إلى 18:00 بتوقيت الجزائر.
+    // التحقق من نافذة التسجيل: الجمعة والسبت من 07:30 إلى 23:00 بتوقيت الجزائر.
     if (!registrationWindowIsOpen(now)) {
       return json({
-        error: "التسجيل متاح يومي الجمعة والسبت من 08:00 إلى 18:00 بتوقيت الجزائر."
+        error: "التسجيل متاح يومي الجمعة والسبت من 07:30 صباحاً إلى 23:00 مساءً بتوقيت الجزائر."
       }, 403);
     }
 
@@ -1414,7 +1416,7 @@ async function generateTeacherId(env, name) {
       }, 400);
     }
 
-    // منع التسجيل بعد نهاية الحصة في يومها.
+    // السماح بالتسجيل قبل الحصة وأثناءها، ومنعه ابتداءً من وقت نهايتها.
     if (sessionDate === today) {
       const nowMinutes = Number(now.hour) * 60 + Number(now.minute);
       const endMinutes =
@@ -1423,7 +1425,7 @@ async function generateTeacherId(env, name) {
 
       if (nowMinutes >= endMinutes) {
         return json({
-          error: "لقد انتهت مدة التسجيل."
+          error: "انتهت الحصة، لا يمكن التسجيل في هذا الفوج الآن."
         }, 400);
       }
     }
