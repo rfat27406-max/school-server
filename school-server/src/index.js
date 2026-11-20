@@ -1398,52 +1398,36 @@ async function generateTeacherId(env, name) {
 
     const now = localNow();
 
+    // التحقق من نافذة التسجيل: الجمعة والسبت من 08:00 إلى 18:00 بتوقيت الجزائر.
     if (!registrationWindowIsOpen(now)) {
       return json({
-        error: "التسجيل متاح يومي الجمعة والسبت من 07:30 إلى 16:00 بتوقيت الجزائر."
+        error: "التسجيل متاح يومي الجمعة والسبت من 08:00 إلى 18:00 بتوقيت الجزائر."
       }, 403);
     }
 
     const today = `${now.year}-${now.month}-${now.day}`;
 
+    // منع التسجيل في تاريخ سابق.
     if (sessionDate < today) {
       return json({
-        error: "لا يمكن التسجيل في حصة انتهى موعدها."
+        error: "لقد انتهت مدة التسجيل."
       }, 400);
     }
-    const now = localNow();
-const today = `${now.year}-${now.month}-${now.day}`;
 
-// 1. منع التسجيل في تاريخ سابق
-if (sessionDate < today) {
-  return json({
-    error: "لقد انتهت مدة التسجيل."
-  }, 400);
-}
+    // منع التسجيل بعد نهاية الحصة في يومها.
+    if (sessionDate === today) {
+      const nowMinutes = Number(now.hour) * 60 + Number(now.minute);
+      const endMinutes =
+        Number(group.end_time.slice(0, 2)) * 60 +
+        Number(group.end_time.slice(3, 5));
 
-// 2. منع التسجيل بعد نهاية الحصة في يومها
-if (sessionDate === today) {
-  const nowMinutes =
-    Number(now.hour) * 60 +
-    Number(now.minute);
+      if (nowMinutes >= endMinutes) {
+        return json({
+          error: "لقد انتهت مدة التسجيل."
+        }, 400);
+      }
+    }
 
-  const endMinutes =
-    Number(group.end_time.slice(0, 2)) * 60 +
-    Number(group.end_time.slice(3, 5));
-
-  if (nowMinutes >= endMinutes) {
-    return json({
-      error: "لقد انتهت مدة التسجيل."
-    }, 400);
-  }
-}
-
-// 3. التحقق من نافذة التسجيل
-if (!registrationWindowIsOpen(now)) {
-  return json({
-    error: "التسجيل متاح يومي الجمعة والسبت من 08:00 إلى 18:00 بتوقيت الجزائر."
-  }, 403);
-}
     const bookingId = crypto.randomUUID();
     const localDate = `${now.year}-${now.month}-${now.day}`;
 
