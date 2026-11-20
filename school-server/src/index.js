@@ -1378,21 +1378,23 @@ async function generateTeacherId(env, name) {
       }, 400);
     }
 
-    if (sessionDate === today) {
-      const nowMinutes =
-        Number(now.hour) * 60 +
-        Number(now.minute);
+    
+if (sessionDate === today) {
+  const nowMinutes =
+    Number(now.hour) * 60 +
+    Number(now.minute);
 
-      const startMinutes =
-        Number(group.start_time.slice(0, 2)) * 60 +
-        Number(group.start_time.slice(3, 5));
+  const endMinutes =
+    Number(group.end_time.slice(0, 2)) * 60 +
+    Number(group.end_time.slice(3, 5));
 
-      if (startMinutes <= nowMinutes) {
-        return json({
-          error: "بدأت هذه الحصة أو انتهى موعدها."
-        }, 400);
-      }
-    }
+  if (nowMinutes >= endMinutes) {
+    return json({
+      error: "انتهى وقت هذه الحصة، لا يمكن التسجيل فيها."
+    }, 400);
+  }
+}
+
 
     const bookingId = crypto.randomUUID();
     const localDate = `${now.year}-${now.month}-${now.day}`;
