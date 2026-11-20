@@ -1411,10 +1411,7 @@ async function generateTeacherId(env, name) {
         error: "لا يمكن التسجيل في حصة انتهى موعدها."
       }, 400);
     }
-
-    
-
-const now = localNow();
+    const now = localNow();
 const today = `${now.year}-${now.month}-${now.day}`;
 
 // 1. منع التسجيل في تاريخ سابق
@@ -1441,15 +1438,12 @@ if (sessionDate === today) {
   }
 }
 
-// 3. التحقق من أيام وساعات فتح التسجيل
+// 3. التحقق من نافذة التسجيل
 if (!registrationWindowIsOpen(now)) {
   return json({
     error: "التسجيل متاح يومي الجمعة والسبت من 08:00 إلى 18:00 بتوقيت الجزائر."
   }, 403);
 }
-
-
-
     const bookingId = crypto.randomUUID();
     const localDate = `${now.year}-${now.month}-${now.day}`;
 
