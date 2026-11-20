@@ -446,27 +446,7 @@ async function handle(request, env) {
   if (path.startsWith("/api/teacher/") && path !== "/api/teacher/login") {
     teacherAuth = await authenticatedTeacher(request, env);
 
-    // الإدارة تستطيع اختيار أي أستاذ لعرض فضائه، بينما الأستاذ العادي
-    // يبقى محصوراً في هويته المستخرجة من جلسة الدخول.
-    if (!teacherAuth) {
-      adminAuth = adminAuth || await authenticatedAdmin(request, env);
-      if (adminAuth) {
-        const requestedTeacherId = String(
-          url.searchParams.get("teacher_id") || "teacher-boumediene"
-        );
-        teacherAuth = await env.DB.prepare(`
-          SELECT id, name, subject, education_level
-          FROM teachers
-          WHERE id = ? AND active = 1
-          LIMIT 1
-        `).bind(requestedTeacherId).first();
-        if (!teacherAuth) {
-          return json({ error: "الأستاذ المحدد غير موجود أو غير نشط." }, 404);
-        }
-      }
-    }
-
-    if (!teacherAuth) return json({ error: "يلزم تسجيل دخول الأستاذ." }, 401);
+    if (!teacherAuth) return json({ error: "يلزم تسجيل دخول الأستاذ بكلمة مروره الخاصة." }, 401);
   }
 
   // Save or refresh this student's Web Push subscription.
@@ -560,6 +540,7 @@ async function handle(request, env) {
     let body = {};
     try { body = await request.json(); } catch {}
     const teacherId = String(body.teacher_id || "");
+    const teacherPassword = String(body.teacher_password || "");
     const name = String(body.name || "").trim();
     const weekday = String(body.weekday || "");
     const start = String(body.start_time || "");
@@ -571,8 +552,12 @@ async function handle(request, env) {
         !Number.isInteger(price) || price < 0) {
       return json({ error: "بيانات الفوج غير صالحة." }, 400);
     }
-    const teacher = await env.DB.prepare("SELECT id FROM teachers WHERE id = ? AND active = 1").bind(teacherId).first();
+    const teacher = await env.DB.prepare("SELECT id, password_hash FROM teachers WHERE id = ? AND active = 1").bind(teacherId).first();
     if (!teacher) return json({ error: "الأستاذ غير موجود." }, 404);
+    if (!teacherPassword || !teacher.password_hash ||
+        !constantTimeEqual(await sha256(teacherPassword), teacher.password_hash)) {
+      return json({ error: "كود الأستاذ غير صحيح؛ لم يتم إنشاء الفوج." }, 401);
+    }
     const result = await env.DB.prepare(`
       INSERT INTO groups (teacher_id, name, weekday, start_time, end_time, price_dzd)
       VALUES (?, ?, ?, ?, ?, ?)

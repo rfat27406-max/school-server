@@ -53,3 +53,9 @@ The migration file is `migrations/0005_student_registration_approval.sql`. It ha
 ## Deploy without a Cloudflare terminal
 
 Push the Worker project files to the connected GitHub repository and let the configured Cloudflare deployment run. Keep `wrangler.jsonc` and its D1 binding intact. Never commit Worker secrets such as `ADMIN_PASSWORD`, `RATE_LIMIT_SECRET`, `BOUMDIENE_INITIAL_PASSWORD`, or `VAPID_PRIVATE_JWK`.
+
+
+## حماية فضاء الأستاذ وربط الأفواج
+- كل مسارات `/api/teacher/*` (عدا تسجيل الدخول) تتطلب جلسة صادرة عن `/api/teacher/login`، ولا يمكن للإدارة انتحال الأستاذ عبر `teacher_id` في الرابط.
+- إنشاء فوج من لوحة الإدارة يتطلب `teacher_id` و`teacher_password`. يتحقق Worker من كلمة مرور الأستاذ المخزنة على شكل hash قبل ربط الفوج به.
+- يجب نشر Worker المحدّث مع لوحة الإدارة المحدّثة حتى تعمل هذه الحماية.
