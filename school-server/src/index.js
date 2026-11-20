@@ -190,7 +190,7 @@ function registrationWindowIsOpen(now) {
     Number(now.hour) * 60 +
     Number(now.minute);
 
-  return allowedDay && minutes >= 480 && minutes < 1200;
+  return allowedDay && minutes >= 480 && minutes < 1800;
 }
 
 
