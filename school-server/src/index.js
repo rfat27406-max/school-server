@@ -191,7 +191,7 @@ function registrationWindowIsOpen(now) {
     Number(now.hour) * 60 +
     Number(now.minute);
 
-  return allowedDay && minutes >= 450 && minutes < 960;
+  return allowedDay && minutes >= 480 && minutes < 1200;
 }
 
 
@@ -323,6 +323,45 @@ async function deliverUpcomingLessonReminders(env) {
 }
 
 async function handle(request, env) {
+  
+function teacherNameCode(name) {
+  const map = {
+    "ا": "A", "أ": "A", "إ": "E", "آ": "A",
+    "ب": "B", "ت": "T", "ث": "TH", "ج": "J",
+    "ح": "H", "خ": "KH", "د": "D", "ذ": "DH",
+    "ر": "R", "ز": "Z", "س": "S", "ش": "SH",
+    "ص": "S", "ض": "D", "ط": "T", "ظ": "Z",
+    "ع": "A", "غ": "GH", "ف": "F", "ق": "Q",
+    "ك": "K", "ل": "L", "م": "M", "ن": "N",
+    "ه": "H", "و": "W", "ي": "Y", "ى": "A"
+  };
+
+  const clean = name.trim().toUpperCase();
+  const latin = clean.replace(/[ء-ي]/g, char => map[char] || "");
+
+  return latin.replace(/[^A-Z]/g, "").slice(0, 3).padEnd(3, "X");
+}
+
+async function generateTeacherId(env, name) {
+  const prefix = `TCH-${teacherNameCode(name)}`;
+
+  const { results } = await env.DB.prepare(`
+    SELECT id FROM teachers
+    WHERE id LIKE ?
+  `).bind(`${prefix}-%`).all();
+
+  let maxNumber = 0;
+
+  for (const teacher of results || []) {
+    const match = teacher.id.match(/-(\d+)$/);
+    if (match) {
+      maxNumber = Math.max(maxNumber, Number(match[1]));
+    }
+  }
+
+  return `${prefix}-${String(maxNumber + 1).padStart(2, "0")}`;
+}
+
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
@@ -514,7 +553,7 @@ async function handle(request, env) {
     if (!name || !subject || !level || password.length < 6) {
       return json({ error: "أدخل اسم الأستاذ والمادة والمستوى وكلمة مرور من 6 أحرف على الأقل." }, 400);
     }
-    const id = `teacher-${crypto.randomUUID()}`;
+    const id = await generateTeacherId(env, name);
     await env.DB.prepare(`
       INSERT INTO teachers (id, name, subject, education_level, password_hash)
       VALUES (?, ?, ?, ?, ?)
