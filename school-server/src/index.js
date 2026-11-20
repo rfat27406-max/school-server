@@ -1413,6 +1413,18 @@ async function generateTeacherId(env, name) {
     }
 
     
+
+const now = localNow();
+const today = `${now.year}-${now.month}-${now.day}`;
+
+// 1. منع التسجيل في تاريخ سابق
+if (sessionDate < today) {
+  return json({
+    error: "لقد انتهت مدة التسجيل."
+  }, 400);
+}
+
+// 2. منع التسجيل بعد نهاية الحصة في يومها
 if (sessionDate === today) {
   const nowMinutes =
     Number(now.hour) * 60 +
@@ -1428,6 +1440,14 @@ if (sessionDate === today) {
     }, 400);
   }
 }
+
+// 3. التحقق من أيام وساعات فتح التسجيل
+if (!registrationWindowIsOpen(now)) {
+  return json({
+    error: "التسجيل متاح يومي الجمعة والسبت من 08:00 إلى 18:00 بتوقيت الجزائر."
+  }, 403);
+}
+
 
 
     const bookingId = crypto.randomUUID();
