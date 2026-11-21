@@ -5,57 +5,48 @@ Cloudflare Worker API لمنصة مدرستي، مع قاعدة بيانات Clo
 ## إعدادات البيئة
 - D1 binding باسم `DB`.
 - Cloudflare Secret باسم `ADMIN_PASSWORD`.
-- Cloudflare Secret باسم `RATE_LIMIT_SECRET`.
+- Cloudflare Secret باسم `RATE_LIMIT_SECRET` (مطلوب لتفعيل تحديد محاولات تسجيل الدخول).
 - Cloudflare Secret باسم `BOUMDIENE_INITIAL_PASSWORD` لتعيين كلمة مرور بومدين أول مرة إذا كان `password_hash` فارغاً.
 - `ALLOWED_ORIGINS` يجب أن يحتوي عناوين واجهات Pages المسموح لها بالاتصال.
+- لا تضع أسرار Worker في GitHub أو في ملفات الواجهة.
+
+## منطق المنصة الذي يجب الحفاظ عليه
+- تسجيل التلميذ يرسل طلباً للمراجعة؛ لا يُنشأ حساب نشط قبل موافقة الإدارة.
+- العمر المقبول من 15 إلى 18 سنة.
+- التسجيل في الأفواج متاح الجمعة والسبت فقط من 07:30 إلى 16:00 بتوقيت الجزائر.
+- حد التسجيل اليومي: 3 حجوزات ناجحة للتلميذ.
+- سعة الأفواج غير محدودة.
+- الأسعار تحفظ داخل كل حجز وقت التسجيل، حتى لا يؤدي تعديل سعر الفوج لاحقاً إلى تغيير السجلات المالية القديمة.
 
 ## الوظائف
-- جلسات دخول مستقلة للإدارة والأساتذة والتلاميذ.
-- إضافة أساتذة مع `password_hash`، ولكل أستاذ أفواجه وبياناته.
-- الإدارة تستطيع اختيار الأستاذ في لوحة التحكم واستعراض فضائه عبر مسارات `/api/teacher/*` مع `teacher_id` في query؛ هذا الاختيار متاح فقط مع جلسة إدارة صالحة.
-- الأستاذ العادي لا يستطيع اختيار `teacher_id` آخر؛ هوية الأستاذ تؤخذ من جلسة الدخول.
+- جلسات مستقلة للإدارة والأساتذة والتلاميذ، مع إبطال الجلسة عند تسجيل الخروج.
+- إضافة وتعديل وإيقاف الأساتذة من الإدارة، مع إبطال جلسات الأستاذ عند إيقاف حسابه.
+- إضافة الأفواج وتعديلها وإيقافها أو إعادة تفعيلها دون حذف سجل الحجوزات.
+- الإدارة تستطيع عرض قائمة المدفوعات والحجوزات كاملة.
+- الأستاذ يرى أفواجه وتلاميذه ومدفوعاته التابعة لحسابه فقط.
 - ملخصات مالية عامة وخاصة بكل أستاذ.
 - إشعارات داخل المنصة للجميع أو لتلميذ محدد، مع سجل إداري.
-
-## الإشعارات
-المسار `POST /api/admin/notifications` ينشر الإشعار في جدول `notifications`، والمسار `GET /api/notifications` يعرض إشعارات التلميذ المسجل. والمسار `GET /api/admin/notifications` يعرض سجل الإدارة.
-هذا الإصدار لا ينفذ Web Push عند إغلاق الموقع. يتطلب ذلك إعداد VAPID وService Worker وتخزين اشتراكات Push وخدمة إرسال وجدولة.
+- تذكيرات Web Push قبل الحصة بحوالي 30 دقيقة عند إعداد مفاتيح VAPID.
 
 ## ترحيلات D1
-تأكد من تطبيق ملفات migrations على قاعدة البيانات البعيدة قبل نشر الوظائف التي تعتمد عليها:
-- `0002_auth_teachers_notifications.sql`
-- `0003_student_daily_group_limit.sql`
+التغييرات الجديدة في هذه النسخة تحتاج إلى ترحيلين إضافيين على قاعدة البيانات الحالية:
 
-لا تعِد تنفيذ جمل `ALTER TABLE ... ADD COLUMN` بعد نجاحها؛ تحقق من وجود العمود أولاً.
+1. `migrations/0006_booking_archive.sql`
+2. `migrations/0007_booking_price_snapshot.sql`
 
+نفّذ عبارات كل ملف مرة واحدة فقط، وبالترتيب، بعد التأكد من أن الترحيلات السابقة مطبقة. لا تعِد تنفيذ جمل `ALTER TABLE ... ADD COLUMN` بعد نجاحها. إذا كان العمود موجوداً بالفعل، افحص قاعدة البيانات ولا تكرر الإضافة.
 
-## تفعيل Web Push والتذكير التلقائي
+ملفات `0005_student_activation.sql` و`0005_student_registration_approval.sql` موجودة في المشروع الحالي؛ لا تُعد تطبيقها إذا سبق تنفيذها. لقاعدة بيانات جديدة، أنشئ الجداول وفق `schema.sql` بدلاً من تشغيل ترحيلات الإصدارات القديمة فوق مخطط مكتمل.
 
-1. نفّذ ملف `migrations/0004_web_push.sql` على قاعدة D1 الحالية مرة واحدة فقط. من D1 Console نفّذ كل عبارة SQL منفردة، ولا تكرر `ALTER TABLE bookings ADD COLUMN reminder_sent_at TEXT` إذا نجحت.
-2. في إعدادات Worker > Settings > Variables and Secrets أضف Secret باسم `VAPID_PRIVATE_JWK` (قيمة المفتاح الخاص تُسلّم بشكل منفصل)، واترك `VAPID_PUBLIC_KEY` و`VAPID_SUBJECT` كمتغيرات عادية في `wrangler.jsonc`.
-3. أضف Cron Trigger في Worker > Settings > Triggers: `*/5 * * * *` (كل خمس دقائق).
-4. انشر Worker الجديد، ثم انشر مشروع التلميذ الذي يحتوي `sw.js`. يجب أن يعمل موقع التلميذ عبر HTTPS.
-5. يفتح التلميذ الإعدادات ويفعّل «الإشعارات والتذكير قبل الحصة»، ثم يسمح للمتصفح. الاشتراك مرتبط بهذا الجهاز وهذا الحساب.
-6. اختبر بإرسال إشعار عام من الإدارة. تذكير الحصة يُرسل آلياً قبل 30 دقيقة تقريباً وفق توقيت الجزائر، ويُعالج الخادم الحجوزات مرة كل خمس دقائق.
+## الإشعارات والتذكير التلقائي
+1. تأكد من تطبيق `migrations/0004_web_push.sql` مرة واحدة.
+2. في إعدادات Worker > Settings > Variables and Secrets أضف Secret باسم `VAPID_PRIVATE_JWK`.
+3. اترك `VAPID_PUBLIC_KEY` و`VAPID_SUBJECT` كمتغيرات عادية في `wrangler.jsonc`.
+4. تأكد من وجود Cron Trigger: `*/5 * * * *`.
+5. انشر Worker ومشروع التلميذ الذي يحتوي `sw.js`. يجب أن يعمل موقع التلميذ عبر HTTPS.
+6. يفعّل التلميذ الإشعارات من الإعدادات ويسمح للمتصفح بها.
 
-لا تضع `VAPID_PRIVATE_JWK` داخل ملفات الواجهة أو المستودع. إذا غيّرت زوج مفاتيح VAPID لاحقاً، يجب على الأجهزة إعادة الاشتراك بالمفتاح العام الجديد.
+لا تضع `VAPID_PRIVATE_JWK` داخل ملفات الواجهة أو المستودع. إذا غيّرت زوج مفاتيح VAPID، يجب على الأجهزة إعادة الاشتراك بالمفتاح العام الجديد.
 
-## Student registration approval (v0005)
-
-- `POST /api/students` creates a pending request only; it does not create a student row or a student session.
-- `GET /api/registration/status` checks the request using its private bearer token.
-- `POST /api/registration/claim` creates a student session only after approval.
-- `GET /api/admin/registration-requests` and `POST /api/admin/registration-requests/:id/decision` are protected by administrator authentication.
-- The unique key in `student_name_registry` reserves a normalized full name while a request is pending and after approval. Rejection releases the reservation.
-
-The migration file is `migrations/0005_student_registration_approval.sql`. It has already been applied manually through Cloudflare D1 Console in this deployment workflow. Do not run it again if the tables/index already exist; its statements are idempotent, but the initial population only inserts missing registry keys. For a fresh database, execute the complete migration once in D1 Console before deploying the Worker.
-
-## Deploy without a Cloudflare terminal
-
-Push the Worker project files to the connected GitHub repository and let the configured Cloudflare deployment run. Keep `wrangler.jsonc` and its D1 binding intact. Never commit Worker secrets such as `ADMIN_PASSWORD`, `RATE_LIMIT_SECRET`, `BOUMDIENE_INITIAL_PASSWORD`, or `VAPID_PRIVATE_JWK`.
-
-
-## حماية فضاء الأستاذ وربط الأفواج
-- كل مسارات `/api/teacher/*` (عدا تسجيل الدخول) تتطلب جلسة صادرة عن `/api/teacher/login`، ولا يمكن للإدارة انتحال الأستاذ عبر `teacher_id` في الرابط.
-- إنشاء فوج من لوحة الإدارة يتطلب `teacher_id` و`teacher_password`. يتحقق Worker من كلمة مرور الأستاذ المخزنة على شكل hash قبل ربط الفوج به.
-- يجب نشر Worker المحدّث مع لوحة الإدارة المحدّثة حتى تعمل هذه الحماية.
+## النشر
+ارفع تغييرات مجلد Worker إلى مستودع GitHub المتصل بـ Cloudflare Workers، ثم تحقق من نجاح النشر. انشر كذلك واجهتي الطالب والإدارة بعد تحديثهما، وتأكد من أن نطاقيهما موجودان ضمن `ALLOWED_ORIGINS`.

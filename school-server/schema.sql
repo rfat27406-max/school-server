@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS students (
   first_name TEXT NOT NULL,
   last_name TEXT NOT NULL,
   age INTEGER NOT NULL CHECK (age BETWEEN 15 AND 18),
+  approval_status TEXT NOT NULL DEFAULT 'approved' CHECK (approval_status IN ('pending','approved','rejected','locked')),
+  rejection_count INTEGER NOT NULL DEFAULT 0 CHECK (rejection_count BETWEEN 0 AND 3),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -44,9 +46,11 @@ CREATE TABLE IF NOT EXISTS bookings (
   id TEXT PRIMARY KEY,
   student_id TEXT NOT NULL REFERENCES students(id),
   group_id INTEGER NOT NULL REFERENCES groups(id),
+  price_dzd INTEGER NOT NULL DEFAULT 300 CHECK (price_dzd >= 0),
   session_date TEXT NOT NULL,
   registered_on TEXT,
   reminder_sent_at TEXT,
+  archived_at TEXT,
   status TEXT NOT NULL DEFAULT 'registered' CHECK (status IN ('registered','cancelled','attended','absent')),
   payment_status TEXT NOT NULL DEFAULT 'unpaid' CHECK (payment_status IN ('unpaid','paid')),
   paid_at TEXT,

@@ -190,8 +190,8 @@ function registrationWindowIsOpen(now) {
     Number(now.hour) * 60 +
     Number(now.minute);
 
-  // الجمعة والسبت فقط: من 07:30 إلى ما قبل 23:00 بتوقيت الجزائر.
-  return allowedDay && minutes >= 450 && minutes < 1380;
+  // الجمعة والسبت فقط: من 07:30 إلى 16:00 بتوقيت الجزائر.
+  return allowedDay && minutes >= 450 && minutes < 960;
 }
 
 
@@ -521,6 +521,24 @@ async function generateTeacherId(env, name) {
     if (!teacherAuth) return json({ error: "يلزم تسجيل دخول الأستاذ بكلمة مروره الخاصة." }, 401);
   }
 
+  if (path === "/api/admin/logout" && request.method === "POST") {
+    const token = bearer(request);
+    await env.DB.prepare("UPDATE admin_sessions SET revoked_at = datetime('now') WHERE token_hash = ? AND revoked_at IS NULL")
+      .bind(await sha256(token)).run();
+    return json({ message: "تم تسجيل خروج الإدارة." });
+  }
+
+  if (path === "/api/teacher/me" && request.method === "GET") {
+    return json({ teacher: teacherAuth });
+  }
+
+  if (path === "/api/teacher/logout" && request.method === "POST") {
+    const token = bearer(request);
+    await env.DB.prepare("UPDATE teacher_sessions SET revoked_at = datetime('now') WHERE token_hash = ? AND revoked_at IS NULL")
+      .bind(await sha256(token)).run();
+    return json({ message: "تم تسجيل خروج الأستاذ." });
+  }
+
   // Save or refresh this student's Web Push subscription.
   if (path === "/api/push/subscribe" && request.method === "POST") {
     const student = await authenticatedStudent(request, env);
@@ -550,22 +568,117 @@ async function generateTeacherId(env, name) {
     return json({ unsubscribed: true });
   }
 
+  // قوائم إدارية كاملة تشمل العناصر المؤرشفة/المعطلة.
+  if (path === "/api/admin/teachers" && request.method === "GET") {
+    const { results } = await env.DB.prepare(`
+      SELECT t.id, t.name, t.subject, t.education_level, t.active,
+        (SELECT COUNT(*) FROM groups g WHERE g.teacher_id = t.id AND g.active = 1) AS groups_count
+      FROM teachers t ORDER BY t.created_at DESC, t.name
+    `).all();
+    return json({ teachers: results });
+  }
+
+  if (path === "/api/admin/groups" && request.method === "GET") {
+    const { results } = await env.DB.prepare(`
+      SELECT g.id, g.teacher_id, g.name, g.weekday, g.start_time, g.end_time,
+        g.price_dzd, g.active, t.active AS teacher_active, t.name AS teacher_name, t.subject
+      FROM groups g JOIN teachers t ON t.id = g.teacher_id
+      ORDER BY g.weekday, g.start_time, g.id
+    `).all();
+    return json({ groups: results, capacity: "unlimited" });
+  }
+
+  const adminGroupAction = path.match(/^\/api\/admin\/groups\/(\d+)\/(update|archive|restore)$/);
+  if (adminGroupAction && request.method === "POST") {
+    const groupId = Number(adminGroupAction[1]);
+    const action = adminGroupAction[2];
+    const existing = await env.DB.prepare("SELECT id FROM groups WHERE id = ?").bind(groupId).first();
+    if (!existing) return json({ error: "الفوج غير موجود." }, 404);
+    if (action === "archive" || action === "restore") {
+      await env.DB.prepare("UPDATE groups SET active = ? WHERE id = ?")
+        .bind(action === "restore" ? 1 : 0, groupId).run();
+      return json({ message: action === "archive" ? "تم إيقاف الفوج وإخفاؤه عن الطلاب." : "تمت إعادة تفعيل الفوج." });
+    }
+    let body = {};
+    try { body = await request.json(); } catch {}
+    const name = String(body.name || "").normalize("NFKC").trim().replace(/\s+/g, " ");
+    const weekday = String(body.weekday || "");
+    const start = String(body.start_time || "");
+    const end = String(body.end_time || "");
+    const price = Number(body.price_dzd);
+    if (!name || name.length > 80 || !["friday", "saturday"].includes(weekday) ||
+        !/^([01]\d|2[0-3]):[0-5]\d$/.test(start) ||
+        !/^([01]\d|2[0-3]):[0-5]\d$/.test(end) || start >= end ||
+        !Number.isInteger(price) || price < 0 || price > 10000000) {
+      return json({ error: "تحقق من اسم الفوج واليوم والتوقيت والسعر." }, 400);
+    }
+    await env.DB.prepare(`
+      UPDATE groups SET name = ?, weekday = ?, start_time = ?, end_time = ?, price_dzd = ?
+      WHERE id = ?
+    `).bind(name, weekday, start, end, price, groupId).run();
+    return json({ message: "تم تحديث بيانات الفوج." });
+  }
+
+  const adminTeacherAction = path.match(/^\/api\/admin\/teachers\/([^/]+)\/(update|status)$/);
+  if (adminTeacherAction && request.method === "POST") {
+    const teacherId = decodeURIComponent(adminTeacherAction[1]);
+    const action = adminTeacherAction[2];
+    const teacher = await env.DB.prepare("SELECT id FROM teachers WHERE id = ?").bind(teacherId).first();
+    if (!teacher) return json({ error: "الأستاذ غير موجود." }, 404);
+    let body = {};
+    try { body = await request.json(); } catch {}
+    if (action === "status") {
+      const active = Number(body.active);
+      if (![0, 1].includes(active)) return json({ error: "حالة الأستاذ غير صالحة." }, 400);
+      await env.DB.prepare("UPDATE teachers SET active = ? WHERE id = ?").bind(active, teacherId).run();
+      if (!active) {
+        await env.DB.prepare("UPDATE teacher_sessions SET revoked_at = datetime('now') WHERE teacher_id = ? AND revoked_at IS NULL")
+          .bind(teacherId).run();
+      }
+      return json({ message: active ? "تم تفعيل حساب الأستاذ." : "تم إيقاف حساب الأستاذ." });
+    }
+    const name = String(body.name || "").normalize("NFKC").trim().replace(/\s+/g, " ");
+    const subject = String(body.subject || "").normalize("NFKC").trim();
+    const level = String(body.education_level || "").normalize("NFKC").trim();
+    if (!name || !subject || !level || name.length > 100 || subject.length > 100 || level.length > 100) {
+      return json({ error: "أدخل الاسم والمادة والمستوى بشكل صحيح." }, 400);
+    }
+    await env.DB.prepare("UPDATE teachers SET name = ?, subject = ?, education_level = ? WHERE id = ?")
+      .bind(name, subject, level, teacherId).run();
+    return json({ message: "تم تحديث بيانات الأستاذ." });
+  }
+
+  if (path === "/api/admin/payments" && request.method === "GET") {
+    const { results } = await env.DB.prepare(`
+      SELECT b.id AS booking_id, b.session_date, b.status, b.payment_status, b.paid_at,
+        s.first_name, s.last_name, g.name AS group_name, b.price_dzd,
+        t.name AS teacher_name
+      FROM bookings b
+      JOIN students s ON s.id = b.student_id
+      JOIN groups g ON g.id = b.group_id
+      JOIN teachers t ON t.id = g.teacher_id
+      ORDER BY b.session_date DESC, b.created_at DESC
+      LIMIT 1000
+    `).all();
+    return json({ payments: results });
+  }
+
   // ملخص مالي شامل للإدارة.
   if (path === "/api/admin/summary" && request.method === "GET") {
     const summary = await env.DB.prepare(`
       SELECT
         (SELECT COUNT(*) FROM students) AS students_count,
         (SELECT COUNT(*) FROM teachers WHERE active = 1) AS teachers_count,
-        (SELECT COUNT(*) FROM groups WHERE active = 1) AS groups_count,
+        (SELECT COUNT(*) FROM groups g JOIN teachers t ON t.id = g.teacher_id WHERE g.active = 1 AND t.active = 1) AS groups_count,
         COUNT(CASE WHEN b.payment_status = 'paid' AND b.status != 'cancelled' THEN 1 END) AS paid_count,
         COUNT(CASE WHEN b.payment_status = 'unpaid' AND b.status != 'cancelled' THEN 1 END) AS unpaid_count,
-        COALESCE(SUM(CASE WHEN b.payment_status = 'paid' AND b.status != 'cancelled' THEN g.price_dzd ELSE 0 END), 0) AS total_revenue
+        COALESCE(SUM(CASE WHEN b.payment_status = 'paid' AND b.status != 'cancelled' THEN b.price_dzd ELSE 0 END), 0) AS total_revenue
       FROM bookings b JOIN groups g ON g.id = b.group_id
     `).first();
     const { results: teachers } = await env.DB.prepare(`
       SELECT t.id, t.name, t.subject,
         COUNT(CASE WHEN b.status != 'cancelled' THEN 1 END) AS bookings_count,
-        COALESCE(SUM(CASE WHEN b.payment_status = 'paid' AND b.status != 'cancelled' THEN g.price_dzd ELSE 0 END), 0) AS revenue
+        COALESCE(SUM(CASE WHEN b.payment_status = 'paid' AND b.status != 'cancelled' THEN b.price_dzd ELSE 0 END), 0) AS revenue
       FROM teachers t
       LEFT JOIN groups g ON g.teacher_id = t.id
       LEFT JOIN bookings b ON b.group_id = g.id
@@ -785,7 +898,7 @@ async function generateTeacherId(env, name) {
           END
         ), 0) AS unpaid_count
       FROM students s
-      LEFT JOIN bookings b ON b.student_id = s.id
+      LEFT JOIN bookings b ON b.student_id = s.id AND b.status != 'cancelled'
       GROUP BY s.id
       ORDER BY s.created_at DESC
     `).all();
@@ -895,8 +1008,7 @@ async function generateTeacherId(env, name) {
       FROM groups g
       JOIN teachers t ON t.id = g.teacher_id
       WHERE g.teacher_id = ?
-        AND g.active = 1
-      ORDER BY g.weekday, g.start_time
+      ORDER BY g.active DESC, g.weekday, g.start_time
     `).bind(teacherAuth.id).all();
 
     return json({ groups: results });
@@ -940,7 +1052,7 @@ async function generateTeacherId(env, name) {
           CASE
             WHEN b.payment_status = 'paid'
               AND b.status != 'cancelled'
-            THEN g.price_dzd
+            THEN b.price_dzd
             ELSE 0
           END
         ), 0) AS total_revenue
@@ -1006,7 +1118,6 @@ async function generateTeacherId(env, name) {
       FROM groups
       WHERE id = ?
         AND teacher_id = ?
-        AND active = 1
       LIMIT 1
     `).bind(
       groupId,
@@ -1034,7 +1145,7 @@ async function generateTeacherId(env, name) {
         s.age,
 
         g.name AS group_name,
-        g.price_dzd
+        b.price_dzd
 
       FROM bookings b
       JOIN students s ON s.id = b.student_id
@@ -1095,7 +1206,7 @@ async function generateTeacherId(env, name) {
         s.first_name,
         s.last_name,
         g.name AS group_name,
-        g.price_dzd
+        b.price_dzd
       FROM bookings b
       JOIN students s ON s.id = b.student_id
       JOIN groups g ON g.id = b.group_id
@@ -1132,7 +1243,7 @@ async function generateTeacherId(env, name) {
         s.first_name,
         s.last_name,
         g.name AS group_name,
-        g.price_dzd,
+        b.price_dzd,
         g.teacher_id
       FROM bookings b
       JOIN students s ON s.id = b.student_id
@@ -1208,15 +1319,15 @@ async function generateTeacherId(env, name) {
       return json({ error: "أدخل الاسم واللقب، ويجب أن يكون العمر بين 15 و18 سنة." }, 400);
     }
     const normalizedName = `${firstName} ${lastName}`.normalize("NFKC").toLocaleLowerCase("ar").replace(/\s+/g, " ").trim();
-    // فحص الحسابات الموجودة بتطبيع مطابق للتطبيع المستخدم في الطلبات الجديدة.
-    // هذا يغطي المسافات المتكررة وأشكال Unicode التي لا يعالجها SQLite lower/trim وحدهما.
-    const existingStudents = await env.DB.prepare(`SELECT id, first_name, last_name FROM students`).all();
+    // تحقق إضافي من سجلات الطلاب القديمة التي قد لا تكون مفاتيحها مطبّعة بنفس Unicode.
+    const existingStudents = await env.DB.prepare("SELECT first_name, last_name FROM students").all();
     const duplicateStudent = (existingStudents.results || []).some(student => {
       const storedName = `${student.first_name || ""} ${student.last_name || ""}`
         .normalize("NFKC").toLocaleLowerCase("ar").replace(/\s+/g, " ").trim();
       return storedName === normalizedName;
     });
     if (duplicateStudent) return json({ error: "يوجد تلميذ مسجل بهذا الاسم واللقب مسبقاً." }, 409);
+    // student_name_registry يحجز الاسم ذرياً لمنع طلبين متزامنين بنفس الاسم.
     const requestId = crypto.randomUUID();
     const requestToken = `${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
     try {
@@ -1235,6 +1346,16 @@ async function generateTeacherId(env, name) {
       status: "pending",
       message: "تم إرسال طلبك بنجاح. حسابك قيد مراجعة الإدارة."
     }, 201);
+  }
+
+  // إبطال جلسة التلميذ عند تسجيل الخروج من هذا الجهاز.
+  if (path === "/api/logout" && request.method === "POST") {
+    const token = bearer(request);
+    if (token) {
+      await env.DB.prepare("UPDATE student_sessions SET revoked_at = datetime('now') WHERE token_hash = ? AND revoked_at IS NULL")
+        .bind(await sha256(token)).run();
+    }
+    return json({ message: "تم تسجيل الخروج." });
   }
 
   // ==========================================
@@ -1321,7 +1442,7 @@ async function generateTeacherId(env, name) {
         g.weekday,
         g.start_time,
         g.end_time,
-        g.price_dzd,
+        b.price_dzd,
         t.name AS teacher_name
       FROM bookings b
       JOIN groups g ON g.id = b.group_id
@@ -1400,10 +1521,10 @@ async function generateTeacherId(env, name) {
 
     const now = localNow();
 
-    // التحقق من نافذة التسجيل: الجمعة والسبت من 07:30 إلى 23:00 بتوقيت الجزائر.
+    // التحقق من نافذة التسجيل: الجمعة والسبت من 07:30 إلى 16:00 بتوقيت الجزائر.
     if (!registrationWindowIsOpen(now)) {
       return json({
-        error: "التسجيل متاح يومي الجمعة والسبت من 07:30 صباحاً إلى 23:00 مساءً بتوقيت الجزائر."
+        error: "التسجيل متاح يومي الجمعة والسبت من 07:30 صباحاً إلى 16:00 مساءً بتوقيت الجزائر."
       }, 403);
     }
 
@@ -1436,8 +1557,8 @@ async function generateTeacherId(env, name) {
     // One atomic INSERT ... SELECT enforces the daily cap in D1 itself.
     // Concurrent requests are serialized by SQLite; duplicates never count.
     const result = await env.DB.prepare(`
-      INSERT INTO bookings (id, student_id, group_id, session_date, registered_on)
-      SELECT ?, ?, ?, ?, ?
+      INSERT INTO bookings (id, student_id, group_id, session_date, registered_on, price_dzd)
+      SELECT ?, ?, ?, ?, ?, (SELECT price_dzd FROM groups WHERE id = ?)
       WHERE (
         SELECT COUNT(*) FROM bookings
         WHERE student_id = ? AND registered_on = ?
@@ -1447,7 +1568,7 @@ async function generateTeacherId(env, name) {
         WHERE student_id = ? AND group_id = ? AND session_date = ?
       )
     `).bind(
-      bookingId, student.id, groupId, sessionDate, localDate,
+      bookingId, student.id, groupId, sessionDate, localDate, groupId,
       student.id, localDate, student.id, groupId, sessionDate
     ).run();
 
